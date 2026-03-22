@@ -10,4 +10,5 @@ venv/
 .env
 config/sources.yaml
 /data/
+.coverage
 .engineering-team/

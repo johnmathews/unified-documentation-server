@@ -1,0 +1,384 @@
+"""Tests for the ingestion module."""
+
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from docserver.config import Config, RepoSource
+from docserver.ingestion import (
+    MAX_FILE_SIZE,
+    Chunk,
+    DocumentParser,
+    Ingester,
+    RepoManager,
+    Section,
+    _chunk_content,
+    _parse_sections,
+)
+
+
+class TestSectionParsing:
+    def test_flat_content_no_headings(self):
+        sections = _parse_sections("Hello world.\n\nSecond paragraph.")
+        assert len(sections) == 1
+        assert sections[0]["heading_path"] == ""
+        assert len(sections[0]["blocks"]) == 2
+
+    def test_single_heading(self):
+        content = "# Title\n\nParagraph one.\n\nParagraph two."
+        sections = _parse_sections(content)
+        assert len(sections) == 1
+        assert sections[0]["heading_path"] == "Title"
+        assert len(sections[0]["blocks"]) == 2
+
+    def test_nested_headings(self):
+        content = "# Top\n\nIntro.\n\n## Sub A\n\nContent A.\n\n## Sub B\n\nContent B."
+        sections = _parse_sections(content)
+        assert len(sections) == 3
+        assert sections[0]["heading_path"] == "Top"
+        assert sections[1]["heading_path"] == "Top > Sub A"
+        assert sections[2]["heading_path"] == "Top > Sub B"
+
+    def test_deep_nesting(self):
+        content = "# H1\n\n## H2\n\n### H3\n\nDeep content."
+        sections = _parse_sections(content)
+        assert sections[-1]["heading_path"] == "H1 > H2 > H3"
+
+    def test_heading_level_reset(self):
+        content = "# First\n\n## Sub\n\nA.\n\n# Second\n\nB."
+        sections = _parse_sections(content)
+        paths = [s["heading_path"] for s in sections]
+        assert "First > Sub" in paths
+        assert "Second" in paths
+
+    def test_list_kept_together(self):
+        content = "# Lists\n\n- item 1\n- item 2\n- item 3\n\nAfter list."
+        sections = _parse_sections(content)
+        blocks = sections[0]["blocks"]
+        # List items should be in one block
+        list_block = [b for b in blocks if "item 1" in b][0]
+        assert "item 2" in list_block
+        assert "item 3" in list_block
+
+    def test_code_fence_kept_together(self):
+        content = "# Code\n\n```python\ndef foo():\n    pass\n```\n\nAfter code."
+        sections = _parse_sections(content)
+        blocks = sections[0]["blocks"]
+        code_block = [b for b in blocks if "def foo" in b][0]
+        assert "```python" in code_block
+        assert "```" in code_block.split("\n")[-1]
+
+    def test_code_fence_with_headings_inside(self):
+        content = "# Real\n\n```\n# Not a heading\n## Also not\n```\n\nAfter."
+        sections = _parse_sections(content)
+        # Should be one section — headings inside code fence are ignored
+        assert len(sections) == 1
+        assert sections[0]["heading_path"] == "Real"
+
+
+class TestChunking:
+    def test_small_content_single_chunk(self):
+        chunks = _chunk_content("Short text.")
+        assert len(chunks) == 1
+        assert chunks[0].text == "Short text."
+        assert chunks[0].section_path == ""
+
+    def test_splits_on_paragraph_boundaries(self):
+        para1 = "A" * 600
+        para2 = "B" * 600
+        content = f"{para1}\n\n{para2}"
+        chunks = _chunk_content(content, target_size=1000, overlap_size=0)
+        assert len(chunks) == 2
+        assert para1 in chunks[0].text
+        assert para2 in chunks[1].text
+
+    def test_groups_small_paragraphs(self):
+        content = "One.\n\nTwo.\n\nThree."
+        chunks = _chunk_content(content, target_size=1000)
+        assert len(chunks) == 1
+        assert "One." in chunks[0].text
+        assert "Three." in chunks[0].text
+
+    def test_oversized_paragraph_emitted_as_is(self):
+        big = "X" * 2000
+        chunks = _chunk_content(big, target_size=1000)
+        assert len(chunks) == 1
+        assert big in chunks[0].text
+
+    def test_empty_content(self):
+        chunks = _chunk_content("")
+        assert len(chunks) == 1
+
+    def test_section_context_in_chunks(self):
+        content = "# Setup\n\n## Ports\n\nPort 8080 is used for the web server."
+        chunks = _chunk_content(content, target_size=1000)
+        assert len(chunks) >= 1
+        # The chunk for "Ports" section should have the heading path
+        port_chunk = [c for c in chunks if "8080" in c.text][0]
+        assert port_chunk.section_path == "Setup > Ports"
+        assert "[Setup > Ports]" in port_chunk.text
+
+    def test_overlap_between_chunks(self):
+        section_content = "\n\n".join([f"Paragraph {i} " + "x" * 200 for i in range(10)])
+        content = f"# Doc\n\n{section_content}"
+        chunks = _chunk_content(content, target_size=500, overlap_size=50)
+        assert len(chunks) >= 2
+        # Second chunk should start with [...] overlap marker
+        assert chunks[1].text.count("[...]") >= 1
+
+    def test_list_not_split_from_intro(self):
+        content = (
+            "# Config\n\n"
+            "The following ports are used:\n\n"
+            "- 8080: web\n- 443: https\n- 22: ssh\n\n"
+            "End of list."
+        )
+        chunks = _chunk_content(content, target_size=5000)
+        # With a large target, everything should be in one chunk
+        assert len(chunks) == 1
+        assert "ports are used" in chunks[0].text
+        assert "8080: web" in chunks[0].text
+
+    def test_multiple_sections_produce_separate_chunks(self):
+        content = (
+            "# Architecture\n\n" + "A" * 800 + "\n\n"
+            "# Deployment\n\n" + "B" * 800
+        )
+        chunks = _chunk_content(content, target_size=1000, overlap_size=0)
+        assert len(chunks) == 2
+        assert chunks[0].section_path == "Architecture"
+        assert chunks[1].section_path == "Deployment"
+
+
+class TestDocumentParser:
+    def test_parse_markdown(self, tmp_path):
+        md_file = tmp_path / "test.md"
+        md_file.write_text("# My Title\n\nSome content here.")
+
+        parser = DocumentParser()
+        doc = parser.parse_markdown(md_file, "test-source", tmp_path)
+
+        assert doc["doc_id"] == "test-source:test.md"
+        assert "Some content here." in doc["content"]
+        assert doc["metadata"]["title"] == "My Title"
+        assert doc["metadata"]["source"] == "test-source"
+        assert doc["metadata"]["file_path"] == "test.md"
+
+    def test_title_fallback_to_filename(self, tmp_path):
+        md_file = tmp_path / "no-heading.md"
+        md_file.write_text("Just some text without a heading.")
+
+        parser = DocumentParser()
+        doc = parser.parse_markdown(md_file, "src", tmp_path)
+
+        assert doc["metadata"]["title"] == "no-heading"
+
+    def test_nested_path(self, tmp_path):
+        nested = tmp_path / "docs" / "sub"
+        nested.mkdir(parents=True)
+        md_file = nested / "deep.md"
+        md_file.write_text("# Deep Doc\n\nNested content.")
+
+        parser = DocumentParser()
+        doc = parser.parse_markdown(md_file, "src", tmp_path)
+
+        assert doc["doc_id"] == "src:docs/sub/deep.md"
+        assert doc["metadata"]["file_path"] == "docs/sub/deep.md"
+
+    def test_file_size_guard(self, tmp_path: Path) -> None:
+        """Files larger than MAX_FILE_SIZE should raise ValueError."""
+        big_file = tmp_path / "huge.md"
+        big_file.write_bytes(b"x" * (MAX_FILE_SIZE + 1))
+
+        parser = DocumentParser()
+        with pytest.raises(ValueError, match="exceeds"):
+            parser.parse_markdown(big_file, "src", tmp_path)
+
+
+class TestRepoManager:
+    def test_get_repo_path_local(self, tmp_path: Path) -> None:
+        """Local source should return source.path directly."""
+        source = RepoSource(name="local", path=str(tmp_path / "myrepo"), is_remote=False)
+        manager = RepoManager(source, str(tmp_path / "clones"))
+        assert manager.get_repo_path() == Path(source.path)
+
+    def test_get_repo_path_remote(self, tmp_path: Path) -> None:
+        """Remote source should return clone_dir / source.name."""
+        source = RepoSource(name="remote-repo", path="https://example.com/repo.git", is_remote=True)
+        clone_dir = str(tmp_path / "clones")
+        manager = RepoManager(source, clone_dir)
+        assert manager.get_repo_path() == Path(clone_dir) / "remote-repo"
+
+    def test_get_files_glob_patterns(self, tmp_path: Path) -> None:
+        """get_files should return only files matching configured glob patterns."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "readme.md").write_text("# README")
+        (repo_dir / "notes.md").write_text("# Notes")
+        (repo_dir / "data.txt").write_text("plain text")
+        (repo_dir / "image.png").write_bytes(b"\x89PNG")
+
+        source = RepoSource(name="local", path=str(repo_dir), glob_patterns=["**/*.md"])
+        manager = RepoManager(source, str(tmp_path / "clones"))
+        files = manager.get_files()
+
+        filenames = {f.name for f in files}
+        assert filenames == {"readme.md", "notes.md"}
+
+    def test_get_files_missing_dir(self, tmp_path: Path) -> None:
+        """get_files should return an empty list when path doesn't exist."""
+        source = RepoSource(name="missing", path=str(tmp_path / "nonexistent"))
+        manager = RepoManager(source, str(tmp_path / "clones"))
+        assert manager.get_files() == []
+
+    def test_sync_local_plain_directory(self, tmp_path: Path) -> None:
+        """A non-git local directory should return False (no error)."""
+        plain_dir = tmp_path / "plain"
+        plain_dir.mkdir()
+        source = RepoSource(name="plain", path=str(plain_dir), is_remote=False)
+        manager = RepoManager(source, str(tmp_path / "clones"))
+        assert manager.sync() is False
+
+    @patch("docserver.ingestion.Repo")
+    def test_sync_remote_clone(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:
+        """Remote repo that doesn't exist locally should trigger clone_from."""
+        clone_dir = tmp_path / "clones"
+        source = RepoSource(
+            name="new-remote",
+            path="https://example.com/repo.git",
+            branch="main",
+            is_remote=True,
+        )
+        manager = RepoManager(source, str(clone_dir))
+
+        # The repo path should not exist yet
+        result = manager.sync()
+
+        mock_repo_cls.clone_from.assert_called_once_with(
+            source.path,
+            clone_dir / "new-remote",
+            branch="main",
+        )
+        assert result is True
+
+
+class TestIngester:
+    @pytest.fixture
+    def kb(self, tmp_path: Path):
+        """Create a real KnowledgeBase in a temp directory."""
+        from docserver.knowledge_base import KnowledgeBase
+
+        _kb = KnowledgeBase(str(tmp_path / "data"))
+        yield _kb
+        _kb.close()
+
+    def _make_source_dir(self, tmp_path: Path, name: str, files: dict[str, str]) -> Path:
+        """Create a temp directory with markdown files and return its path."""
+        source_dir = tmp_path / name
+        source_dir.mkdir(parents=True, exist_ok=True)
+        for filename, content in files.items():
+            filepath = source_dir / filename
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            filepath.write_text(content)
+        return source_dir
+
+    def test_run_once_with_files(self, tmp_path: Path, kb) -> None:
+        """run_once should parse markdown files and upsert docs into KB."""
+        source_dir = self._make_source_dir(tmp_path, "repo-a", {
+            "readme.md": "# Hello\n\nWorld.",
+            "guide.md": "# Guide\n\nSome guide content.",
+        })
+        config = Config(
+            sources=[RepoSource(name="repo-a", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats = ingester.run_once()
+
+        assert "repo-a" in stats
+        # 2 parent docs + at least 2 chunks = at least 4 upserts
+        assert stats["repo-a"]["upserted"] >= 4
+        assert stats["repo-a"]["deleted"] == 0
+
+        # Verify docs exist in KB
+        ids = kb.get_all_doc_ids_for_source("repo-a")
+        assert "repo-a:readme.md" in ids
+        assert "repo-a:guide.md" in ids
+
+    def test_run_once_source_filter(self, tmp_path: Path, kb) -> None:
+        """run_once(sources=["source-a"]) should only process source-a."""
+        dir_a = self._make_source_dir(tmp_path, "source-a", {"a.md": "# A\n\nContent A."})
+        dir_b = self._make_source_dir(tmp_path, "source-b", {"b.md": "# B\n\nContent B."})
+
+        config = Config(
+            sources=[
+                RepoSource(name="source-a", path=str(dir_a)),
+                RepoSource(name="source-b", path=str(dir_b)),
+            ],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats = ingester.run_once(sources=["source-a"])
+
+        assert "source-a" in stats
+        assert "source-b" not in stats
+        assert stats["source-a"]["upserted"] >= 2  # parent + at least 1 chunk
+
+        # source-b should have nothing in KB
+        assert kb.get_all_doc_ids_for_source("source-b") == set()
+
+    def test_run_once_stale_doc_cleanup(self, tmp_path: Path, kb) -> None:
+        """Docs no longer present in the source should be deleted on next run."""
+        source_dir = self._make_source_dir(tmp_path, "cleanup-src", {
+            "keep.md": "# Keep\n\nStays.",
+            "remove.md": "# Remove\n\nGoes away.",
+        })
+        config = Config(
+            sources=[RepoSource(name="cleanup-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+
+        # First run: both files ingested
+        stats1 = ingester.run_once()
+        assert stats1["cleanup-src"]["upserted"] >= 4
+
+        ids_before = kb.get_all_doc_ids_for_source("cleanup-src")
+        assert "cleanup-src:remove.md" in ids_before
+
+        # Delete the file from disk
+        (source_dir / "remove.md").unlink()
+
+        # Second run: stale docs should be cleaned up
+        stats2 = ingester.run_once()
+        assert stats2["cleanup-src"]["deleted"] >= 1  # parent + chunks
+
+        ids_after = kb.get_all_doc_ids_for_source("cleanup-src")
+        assert "cleanup-src:remove.md" not in ids_after
+        assert "cleanup-src:keep.md" in ids_after
+
+    def test_run_once_skips_large_files(self, tmp_path: Path, kb) -> None:
+        """Files exceeding MAX_FILE_SIZE should be skipped."""
+        source_dir = self._make_source_dir(tmp_path, "big-src", {
+            "small.md": "# Small\n\nOK.",
+        })
+        # Create an oversized file
+        big_file = source_dir / "huge.md"
+        big_file.write_bytes(b"# Huge\n\n" + b"x" * (MAX_FILE_SIZE + 1))
+
+        config = Config(
+            sources=[RepoSource(name="big-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats = ingester.run_once()
+
+        # Only small.md should have been upserted (parent + chunk(s))
+        assert stats["big-src"]["upserted"] >= 2
+
+        ids = kb.get_all_doc_ids_for_source("big-src")
+        assert "big-src:small.md" in ids
+        # The huge file should not be in KB
+        assert not any("huge.md" in doc_id for doc_id in ids)

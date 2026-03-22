@@ -139,3 +139,14 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 | `DOCSERVER_LOG_LEVEL` | `INFO` | Python log level |
 
 Changes to environment variables require a container restart to take effect.
+
+## CI/CD
+
+A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) builds and pushes the Docker image to `ghcr.io/johnmathews/documentation-mcp-server` on every push to `main`.
+
+The image is tagged with:
+
+- `latest` -- always points to the most recent build from `main`
+- `sha-<short>` -- the git commit SHA for traceability
+
+The workflow authenticates to `ghcr.io` using the built-in `GITHUB_TOKEN` secret (no manual secret configuration needed).

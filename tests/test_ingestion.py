@@ -343,11 +343,14 @@ class TestRepoManager:
         mock_repo.close.assert_called_once()
 
     @patch("docserver.ingestion.Repo")
-    def test_sync_remote_corrupt_head_recovers(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:
-        """Remote sync should recover when HEAD is unreadable (corrupt refs)."""
+    def test_sync_remote_corrupt_head_reclones(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:
+        """Remote sync should delete clone and re-clone when HEAD has corrupt refs."""
         clone_dir = tmp_path / "clones"
         repo_path = clone_dir / "corrupt-remote"
         repo_path.mkdir(parents=True)
+        # Put a marker file so we can verify the directory was deleted
+        (repo_path / ".git").mkdir()
+        (repo_path / ".git" / "corrupt-ref").write_text("bad")
 
         source = RepoSource(
             name="corrupt-remote",
@@ -358,31 +361,23 @@ class TestRepoManager:
         manager = RepoManager(source, str(clone_dir))
 
         mock_repo = MagicMock()
-        # First access to head.commit.hexsha raises ValueError (corrupt ref)
         type(mock_repo.head).commit = property(
             lambda self: (_ for _ in ()).throw(ValueError("Invalid reference"))
         )
         mock_repo_cls.return_value = mock_repo
 
-        # After reset, head.commit works again
-        call_count = 0
-
-        def head_commit_getter(self):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 1:
-                raise ValueError("Invalid reference")
-            mock_commit = MagicMock()
-            mock_commit.hexsha = "abc123"
-            return mock_commit
-
-        type(mock_repo.head).commit = property(head_commit_getter)
-
         result = manager.sync()
 
-        mock_repo.remotes.origin.fetch.assert_called_once()
-        mock_repo.head.reset.assert_called_once_with("origin/main", index=True, working_tree=True)
+        # Should have closed the corrupt repo (once in handler, once in finally)
+        assert mock_repo.close.call_count >= 1
+        mock_repo_cls.clone_from.assert_called_once_with(
+            source.path,
+            repo_path,
+            branch="main",
+        )
         assert result is True
+        # The corrupt marker file should be gone (directory was nuked)
+        assert not (repo_path / ".git" / "corrupt-ref").exists()
 
     @patch("docserver.ingestion.Repo")
     def test_sync_local_uses_fetch_and_reset(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:

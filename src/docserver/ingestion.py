@@ -257,33 +257,35 @@ class RepoManager:
             origin = repo.remotes.origin
 
             # Read current HEAD for change detection. This can fail if the repo
-            # is in a corrupt state (e.g. invalid branch refs), so fall back to
-            # None and treat the result as "changed" after reset.
+            # is in a corrupt state (e.g. invalid branch refs). In that case,
+            # delete the clone and re-clone fresh — corrupt refs persist through
+            # fetch+reset and GitPython cannot operate on them.
             try:
                 old_head = repo.head.commit.hexsha
             except (ValueError, TypeError):
+                display_url = re.sub(r"://[^@]+@", "://<redacted>@", self.source.path)
                 logger.warning(
-                    "Could not read HEAD for remote repo '%s' at '%s' — the repo "
-                    "may have corrupt references. Will fetch and reset to recover.",
+                    "Remote repo '%s' at '%s' has corrupt git references and cannot be "
+                    "read. Deleting the clone and re-cloning from %s to recover.",
                     self.source.name,
                     repo_path,
+                    display_url,
                     extra={"event": "corrupt_head", "source": self.source.name, "path": str(repo_path)},
                 )
-                old_head = None
+                repo.close()
+                shutil.rmtree(repo_path, ignore_errors=True)
+                repo_path.mkdir(parents=True, exist_ok=True)
+                Repo.clone_from(self.source.path, repo_path, branch=branch)
+                logger.info(
+                    "Re-clone complete for '%s' — repo recovered.",
+                    self.source.name,
+                    extra={"event": "clone_done", "source": self.source.name},
+                )
+                return True
 
             origin.fetch()
             repo.head.reset(f"origin/{branch}", index=True, working_tree=True)
             new_head = repo.head.commit.hexsha
-
-            if old_head is None:
-                logger.info(
-                    "Fetched and reset remote repo '%s' to origin/%s (%s). "
-                    "Previous HEAD was unreadable — repo state has been recovered.",
-                    self.source.name,
-                    branch,
-                    new_head[:8],
-                )
-                return True
             changed = old_head != new_head
             if changed:
                 logger.info(
@@ -379,27 +381,36 @@ class RepoManager:
                 old_head = repo.head.commit.hexsha
             except (ValueError, TypeError):
                 logger.warning(
-                    "Could not read HEAD for local repo '%s' at '%s' — the repo "
-                    "may have corrupt references. Will fetch and reset to recover.",
+                    "Local repo '%s' at '%s' has corrupt git references. "
+                    "Attempting to recover by checking out origin/%s.",
                     self.source.name,
                     repo_path,
+                    branch,
                     extra={"event": "corrupt_head", "source": self.source.name, "path": str(repo_path)},
                 )
                 old_head = None
 
             repo.remotes.origin.fetch()
-            repo.head.reset(f"origin/{branch}", index=True, working_tree=True)
-            new_head = repo.head.commit.hexsha
 
             if old_head is None:
+                # HEAD is corrupt — use subprocess to fix it since GitPython
+                # cannot operate on repos with invalid ref names.
+                subprocess.run(
+                    ["git", "checkout", "-B", branch, f"origin/{branch}"],
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    check=True,
+                )
                 logger.info(
-                    "Fetched and reset local repo '%s' to origin/%s (%s). "
-                    "Previous HEAD was unreadable — repo state has been recovered.",
+                    "Recovered local repo '%s' by checking out origin/%s.",
                     self.source.name,
                     branch,
-                    new_head[:8],
+                    extra={"event": "corrupt_head_recovered", "source": self.source.name},
                 )
                 return True
+
+            repo.head.reset(f"origin/{branch}", index=True, working_tree=True)
+            new_head = repo.head.commit.hexsha
             changed = old_head != new_head
             if changed:
                 logger.info(

@@ -227,6 +227,49 @@ def test_query_documents_combined_filters(kb):
     assert docs[0]["doc_id"] == "alpha:docs/setup.md"
 
 
+def test_get_indexed_modified_times(kb):
+    """get_indexed_modified_times should return mtime for parent docs only."""
+    kb.upsert_document(
+        "src:a.md",
+        "",
+        {"source": "src", "file_path": "a.md", "is_chunk": False, "modified_at": "2026-01-01T00:00:00"},
+    )
+    kb.upsert_document(
+        "src:a.md#chunk0",
+        "content",
+        {"source": "src", "file_path": "a.md", "chunk_index": 0, "is_chunk": True, "modified_at": "2026-01-01T00:00:00"},
+    )
+    kb.upsert_document(
+        "src:b.md",
+        "",
+        {"source": "src", "file_path": "b.md", "is_chunk": False, "modified_at": "2026-02-01T00:00:00"},
+    )
+
+    mtimes = kb.get_indexed_modified_times("src")
+    assert mtimes == {
+        "src:a.md": "2026-01-01T00:00:00",
+        "src:b.md": "2026-02-01T00:00:00",
+    }
+
+
+def test_get_indexed_modified_times_empty_source(kb):
+    """Empty source should return empty dict."""
+    assert kb.get_indexed_modified_times("nonexistent") == {}
+
+
+def test_get_indexed_modified_times_ignores_other_sources(kb):
+    """Should only return mtimes for the requested source."""
+    kb.upsert_document(
+        "a:doc.md", "", {"source": "a", "file_path": "doc.md", "is_chunk": False, "modified_at": "2026-01-01"}
+    )
+    kb.upsert_document(
+        "b:doc.md", "", {"source": "b", "file_path": "doc.md", "is_chunk": False, "modified_at": "2026-02-01"}
+    )
+    mtimes = kb.get_indexed_modified_times("a")
+    assert "a:doc.md" in mtimes
+    assert "b:doc.md" not in mtimes
+
+
 def test_delete_source_documents(kb):
     """delete_source_documents should remove only the targeted source's docs."""
     # Upsert docs for two sources

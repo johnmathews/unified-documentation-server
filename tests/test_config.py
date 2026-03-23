@@ -96,6 +96,26 @@ class TestExpandEnvVars:
         with pytest.raises(ValueError, match="MISSING_VAR"):
             _expand_env_vars("https://${MISSING_VAR}@example.com")
 
+    def test_multiple_vars_in_one_string(self, monkeypatch):
+        monkeypatch.setenv("USER", "john")
+        monkeypatch.setenv("TOKEN", "secret")
+        result = _expand_env_vars("https://${USER}:${TOKEN}@github.com")
+        assert result == "https://john:secret@github.com"
+
+    def test_partial_expansion_fails_on_missing(self, monkeypatch):
+        """If one var exists but another doesn't, should still raise."""
+        monkeypatch.setenv("GOOD_VAR", "ok")
+        monkeypatch.delenv("BAD_VAR", raising=False)
+        with pytest.raises(ValueError, match="BAD_VAR"):
+            _expand_env_vars("${GOOD_VAR}:${BAD_VAR}")
+
+    def test_dollar_without_braces_not_expanded(self):
+        """$VAR (without braces) should not be expanded."""
+        assert _expand_env_vars("$NOT_A_VAR") == "$NOT_A_VAR"
+
+    def test_empty_string_unchanged(self):
+        assert _expand_env_vars("") == ""
+
     def test_source_path_expanded_in_load_config(self, monkeypatch):
         monkeypatch.setenv("GH_TOKEN", "tok_abc")
         data = {

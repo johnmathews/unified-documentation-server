@@ -425,6 +425,129 @@ class TestIngester:
         assert stats2["mod-src"]["skipped"] == 1  # stable.md
         assert stats2["mod-src"]["upserted"] >= 2  # changing.md parent + chunk(s)
 
+    def test_run_once_first_run_all_new(self, tmp_path: Path, kb) -> None:
+        """First run should report all files as 'new'."""
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "new-src",
+            {
+                "a.md": "# A\n\nContent.",
+                "b.md": "# B\n\nContent.",
+                "c.md": "# C\n\nContent.",
+            },
+        )
+        config = Config(
+            sources=[RepoSource(name="new-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats = ingester.run_once()
+
+        assert stats["new-src"]["new"] == 3
+        assert stats["new-src"]["modified"] == 0
+        assert stats["new-src"]["skipped"] == 0
+
+    def test_run_once_modified_file_counted_as_modified(self, tmp_path: Path, kb) -> None:
+        """A changed file on the second run should be counted as 'modified', not 'new'."""
+        import time
+
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "mod-count-src",
+            {"a.md": "# A\n\nOriginal."},
+        )
+        config = Config(
+            sources=[RepoSource(name="mod-count-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats1 = ingester.run_once()
+        assert stats1["mod-count-src"]["new"] == 1
+
+        time.sleep(0.05)
+        (source_dir / "a.md").write_text("# A\n\nUpdated.")
+
+        stats2 = ingester.run_once()
+        assert stats2["mod-count-src"]["new"] == 0
+        assert stats2["mod-count-src"]["modified"] == 1
+
+    def test_run_once_empty_source(self, tmp_path: Path, kb) -> None:
+        """A source with no matching files should complete without errors."""
+        source_dir = tmp_path / "empty-src"
+        source_dir.mkdir()
+
+        config = Config(
+            sources=[RepoSource(name="empty-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats = ingester.run_once()
+
+        assert stats["empty-src"]["files"] == 0
+        assert stats["empty-src"]["upserted"] == 0
+        assert stats["empty-src"]["errors"] == 0
+
+    def test_run_once_add_file_after_initial_index(self, tmp_path: Path, kb) -> None:
+        """Adding a file to a previously-indexed source should index only the new file."""
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "add-src",
+            {"existing.md": "# Existing\n\nAlready here."},
+        )
+        config = Config(
+            sources=[RepoSource(name="add-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        ingester.run_once()
+
+        # Add a new file
+        (source_dir / "brand_new.md").write_text("# Brand New\n\nJust added.")
+
+        stats2 = ingester.run_once()
+        assert stats2["add-src"]["new"] == 1
+        assert stats2["add-src"]["skipped"] == 1  # existing.md
+        assert stats2["add-src"]["deleted"] == 0
+
+        ids = kb.get_all_doc_ids_for_source("add-src")
+        assert "add-src:brand_new.md" in ids
+        assert "add-src:existing.md" in ids
+
+    def test_run_once_delete_and_modify_same_cycle(self, tmp_path: Path, kb) -> None:
+        """Deleting one file and modifying another in the same cycle."""
+        import time
+
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "mixed-src",
+            {
+                "keep.md": "# Keep\n\nStays.",
+                "remove.md": "# Remove\n\nGone.",
+                "change.md": "# Change\n\nOriginal.",
+            },
+        )
+        config = Config(
+            sources=[RepoSource(name="mixed-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        ingester.run_once()
+
+        # Delete one, modify another
+        (source_dir / "remove.md").unlink()
+        time.sleep(0.05)
+        (source_dir / "change.md").write_text("# Change\n\nModified.")
+
+        stats2 = ingester.run_once()
+        assert stats2["mixed-src"]["modified"] == 1  # change.md
+        assert stats2["mixed-src"]["skipped"] == 1  # keep.md
+        assert stats2["mixed-src"]["deleted"] >= 1  # remove.md + its chunks
+
+        ids = kb.get_all_doc_ids_for_source("mixed-src")
+        assert "mixed-src:keep.md" in ids
+        assert "mixed-src:change.md" in ids
+        assert "mixed-src:remove.md" not in ids
+
     def test_run_once_skips_large_files(self, tmp_path: Path, kb) -> None:
         """Files exceeding MAX_FILE_SIZE should be skipped."""
         source_dir = self._make_source_dir(

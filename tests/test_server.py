@@ -186,7 +186,7 @@ class TestReindex:
 
 class TestHealthEndpoint:
     def test_health_returns_ok(self, app) -> None:
-        """GET /health should return JSON with status 'ok'."""
+        """GET /health should return JSON with status 'ok' and per-source detail."""
         starlette_app = app.streamable_http_app()
         client = TestClient(starlette_app)
         response = client.get("/health")
@@ -197,6 +197,13 @@ class TestHealthEndpoint:
         assert "total_chunks" in body
         assert "sources" in body
         assert isinstance(body["sources"], list)
+        # Verify per-source structure if sources exist
+        if body["sources"]:
+            src = body["sources"][0]
+            assert "source" in src
+            assert "file_count" in src
+            assert "chunk_count" in src
+            assert "last_indexed" in src
 
     def test_health_returns_503_on_error(self, app) -> None:
         """GET /health should return 503 when KB raises."""

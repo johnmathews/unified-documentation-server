@@ -68,6 +68,47 @@ def test_json_formatter_exception():
     assert "ValueError" in parsed["exception"]
 
 
+def test_json_formatter_arbitrary_extra_fields():
+    """Formatter should include any extra field, not just a fixed allowlist."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=1,
+        msg="ingestion done",
+        args=(),
+        exc_info=None,
+    )
+    record.source = "my-repo"
+    record.change_type = "modified"
+    record.progress = "3/10"
+    record.custom_field = {"nested": True}
+    output = formatter.format(record)
+    parsed = json.loads(output)
+    assert parsed["source"] == "my-repo"
+    assert parsed["change_type"] == "modified"
+    assert parsed["progress"] == "3/10"
+    assert parsed["custom_field"] == {"nested": True}
+
+
+def test_json_formatter_no_extra_fields():
+    """Standard fields only — no spurious keys in output."""
+    formatter = JSONFormatter()
+    record = logging.LogRecord(
+        name="test",
+        level=logging.WARNING,
+        pathname="test.py",
+        lineno=1,
+        msg="plain message",
+        args=(),
+        exc_info=None,
+    )
+    output = formatter.format(record)
+    parsed = json.loads(output)
+    assert set(parsed.keys()) == {"timestamp", "level", "logger", "message"}
+
+
 def test_setup_logging_json():
     setup_logging(level="DEBUG", json_output=True)
     root = logging.getLogger()

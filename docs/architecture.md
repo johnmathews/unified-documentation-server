@@ -47,7 +47,7 @@ The ingestion layer manages git repositories and converts markdown files into se
 - **Ingester**: Orchestrates the full cycle via APScheduler. On each tick:
   1. Clean up orphaned sources — detects renames via URL matching before deleting (see below)
   2. Sync each repo (clone/pull)
-  3. Enumerate files matching glob patterns
+  3. Enumerate files matching glob patterns (default: `**/*.md` — all markdown files in the entire repo)
   4. Compare SHA-256 content hash against stored hash — skip unchanged files
   5. Parse and chunk changed files
   6. Upsert into the knowledge base

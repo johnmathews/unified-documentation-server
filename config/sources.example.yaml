@@ -2,30 +2,44 @@
 #
 # Each source points to a git repository (local or remote) containing
 # documentation files. The server polls for changes on the configured interval.
+#
+# Source fields:
+#   name       (required) - Unique identifier for this source
+#   path       (required) - Local directory path or git URL. Supports ${VAR}
+#                           env var expansion (e.g. https://${GITHUB_TOKEN}@...)
+#   branch     (optional) - Git branch to track. Default: "main"
+#   is_remote  (optional) - Set to true for git URLs. Default: false
+#   patterns   (optional) - List of glob patterns to select files for indexing.
+#                           Default: ["**/*.md"] which indexes ALL markdown files
+#                           in the entire repo, including README.md and any .md
+#                           files in subdirectories. Set this explicitly if you
+#                           only want to index specific directories.
 
 sources:
-  # Local repository mounted into the container
+  # Example: index ALL markdown files in a local directory (default behavior).
+  # Since no "patterns" is specified, this uses the default ["**/*.md"] which
+  # recursively matches every .md file in the repo.
   - name: "home-server-docs"
     path: "/repos/home-server-docs"
     branch: "main"
-    patterns:
-      - "**/*.md"
 
-  # Remote repository (cloned automatically)
-  # - name: "external-docs"
+  # Example: remote repo, also using the default pattern (all .md files).
+  # - name: "my-project"
+  #   path: "https://github.com/user/repo.git"
+  #   branch: "main"
+  #   is_remote: true
+
+  # Example: index only specific subdirectories of a remote repo.
+  # Setting "patterns" explicitly overrides the default, so only files under
+  # docs/ and journal/ will be indexed. README.md at the repo root would NOT
+  # be indexed with these patterns.
+  # - name: "selective-indexing"
   #   path: "https://github.com/user/repo.git"
   #   branch: "main"
   #   is_remote: true
   #   patterns:
   #     - "docs/**/*.md"
-  #     - "**/*.md"
-
-  # Development journal
-  # - name: "journal"
-  #   path: "/repos/journal"
-  #   patterns:
-  #     - "**/*.md"
-  #     - "**/*.txt"
+  #     - "journal/**/*.md"
 
 # Polling interval in seconds (default: 300 = 5 minutes)
 poll_interval: 300

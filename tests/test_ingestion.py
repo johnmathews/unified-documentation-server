@@ -260,6 +260,114 @@ class TestRepoManager:
         )
         assert result is True
 
+    @patch("docserver.ingestion.Repo")
+    def test_sync_remote_uses_fetch_and_reset(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:
+        """Remote sync should use fetch+reset instead of pull to force-overwrite local state."""
+        clone_dir = tmp_path / "clones"
+        repo_path = clone_dir / "my-remote"
+        repo_path.mkdir(parents=True)
+
+        source = RepoSource(
+            name="my-remote",
+            path="https://example.com/repo.git",
+            branch="main",
+            is_remote=True,
+        )
+        manager = RepoManager(source, str(clone_dir))
+
+        mock_repo = MagicMock()
+        mock_repo.head.commit.hexsha = "aaa"
+        mock_repo_cls.return_value = mock_repo
+
+        # After reset, simulate a new commit
+        def update_head(*args, **kwargs):
+            mock_repo.head.commit.hexsha = "bbb"
+
+        mock_repo.head.reset.side_effect = update_head
+
+        result = manager.sync()
+
+        mock_repo.remotes.origin.fetch.assert_called_once()
+        mock_repo.head.reset.assert_called_once_with("origin/main", index=True, working_tree=True)
+        # pull should NOT be called
+        mock_repo.remotes.origin.pull.assert_not_called()
+        assert result is True
+
+    @patch("docserver.ingestion.Repo")
+    def test_sync_remote_no_changes(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:
+        """Remote sync should return False when HEAD is unchanged after fetch+reset."""
+        clone_dir = tmp_path / "clones"
+        repo_path = clone_dir / "my-remote"
+        repo_path.mkdir(parents=True)
+
+        source = RepoSource(
+            name="my-remote",
+            path="https://example.com/repo.git",
+            branch="main",
+            is_remote=True,
+        )
+        manager = RepoManager(source, str(clone_dir))
+
+        mock_repo = MagicMock()
+        # Same commit before and after
+        mock_repo.head.commit.hexsha = "aaa"
+        mock_repo_cls.return_value = mock_repo
+
+        result = manager.sync()
+
+        assert result is False
+
+    @patch("docserver.ingestion.Repo")
+    def test_sync_remote_fetch_error_returns_false(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:
+        """Remote sync should return False and not crash when fetch fails."""
+        clone_dir = tmp_path / "clones"
+        repo_path = clone_dir / "my-remote"
+        repo_path.mkdir(parents=True)
+
+        source = RepoSource(
+            name="my-remote",
+            path="https://example.com/repo.git",
+            branch="main",
+            is_remote=True,
+        )
+        manager = RepoManager(source, str(clone_dir))
+
+        mock_repo = MagicMock()
+        mock_repo.head.commit.hexsha = "aaa"
+        mock_repo.remotes.origin.fetch.side_effect = RuntimeError("network error")
+        mock_repo_cls.return_value = mock_repo
+
+        result = manager.sync()
+
+        assert result is False
+        mock_repo.close.assert_called_once()
+
+    @patch("docserver.ingestion.Repo")
+    def test_sync_local_uses_fetch_and_reset(self, mock_repo_cls: MagicMock, tmp_path: Path) -> None:
+        """Local git repo sync should use fetch+reset instead of pull."""
+        repo_dir = tmp_path / "local-repo"
+        repo_dir.mkdir()
+        # Make it look like a git repo by letting Repo() succeed
+        source = RepoSource(name="local-git", path=str(repo_dir), branch="main", is_remote=False)
+        manager = RepoManager(source, str(tmp_path / "clones"))
+
+        mock_repo = MagicMock()
+        mock_repo.head.commit.hexsha = "aaa"
+        mock_repo.remotes.__bool__ = lambda self: True
+        mock_repo_cls.return_value = mock_repo
+
+        def update_head(*args, **kwargs):
+            mock_repo.head.commit.hexsha = "bbb"
+
+        mock_repo.head.reset.side_effect = update_head
+
+        result = manager.sync()
+
+        mock_repo.remotes.origin.fetch.assert_called_once()
+        mock_repo.head.reset.assert_called_once_with("origin/main", index=True, working_tree=True)
+        mock_repo.remotes.origin.pull.assert_not_called()
+        assert result is True
+
 
 class TestIngester:
     @pytest.fixture

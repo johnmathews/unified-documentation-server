@@ -97,6 +97,7 @@ Key log events (filter with `grep '"event":'`):
 | `local_path_missing` | `source`, `path`, `parent_exists` | Local source path not found, with parent dir check |
 | `local_path_not_dir` | `source`, `path` | Local source path is not a directory |
 | `invalid_clone` | `source`, `path` | Clone directory exists but is not a valid git repo |
+| `fetch_error` | `source`, `branch`, `path` | Fetch or reset failed (network, auth, branch, or corruption) |
 | `no_files_matched` | `source`, `path`, `patterns`, `top_level_contents`, `found_doc_dirs` | Detailed diagnostics when glob patterns match nothing |
 | `files_found` | `source`, `file_count` | Files matched by glob patterns |
 | `indexing_file` | `source`, `doc_id`, `change_type`, `chunks`, `progress` | Per-file progress: `[3/24] Indexing new file 'docs/setup.md' (5 chunks)` |
@@ -121,7 +122,7 @@ Docker log rotation is configured in `docker-compose.yml`: 3 files, 10MB max eac
 Check logs for these messages:
 
 - `"Failed to parse"` -- A markdown file could not be parsed. The file is skipped but other files continue.
-- `"Failed to pull"` -- A git pull failed for a source. The log includes the redacted URL, branch, and clone directory, plus a list of possible causes (network, auth, branch deleted, etc.).
+- `"Failed to fetch"` -- A git fetch or reset failed for a source. The log includes the redacted URL, branch, and clone directory, plus a list of possible causes (network, auth, branch deleted, etc.). The server uses `fetch` + `reset --hard` (not `pull`) so that the local clone always matches the remote exactly, with no merge conflicts possible.
 - `"Failed to clone"` -- Initial clone of a remote repo failed. The empty clone directory is automatically removed so the next ingestion cycle retries. The log lists possible causes: bad URL, expired credentials, nonexistent branch, network issues, disk space.
 - `"Unexpected error syncing"` -- Catch-all for other sync failures. Includes the source path, remote flag, and branch.
 

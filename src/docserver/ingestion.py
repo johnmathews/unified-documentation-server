@@ -253,18 +253,28 @@ class RepoManager:
             return False
 
         try:
+            branch = self.source.branch or "main"
             origin = repo.remotes.origin
-            fetch_infos = origin.pull()
-            changed = any(fi.flags & fi.NEW_HEAD for fi in fetch_infos)
+            old_head = repo.head.commit.hexsha
+            origin.fetch()
+            repo.head.reset(f"origin/{branch}", index=True, working_tree=True)
+            new_head = repo.head.commit.hexsha
+            changed = old_head != new_head
             if changed:
-                logger.info("Pulled changes for remote repo '%s'.", self.source.name)
+                logger.info(
+                    "Fetched and reset remote repo '%s' to origin/%s (%s -> %s).",
+                    self.source.name,
+                    branch,
+                    old_head[:8],
+                    new_head[:8],
+                )
             else:
                 logger.debug("No changes for remote repo '%s'.", self.source.name)
             return changed
         except Exception:
             display_url = re.sub(r"://[^@]+@", "://<redacted>@", self.source.path)
             logger.exception(
-                "Failed to pull remote repo '%s' (url: %s, branch: %s, clone dir: '%s'). "
+                "Failed to fetch remote repo '%s' (url: %s, branch: %s, clone dir: '%s'). "
                 "This could be due to: network connectivity issues, invalid or expired "
                 "credentials in the repo URL, the branch no longer existing, or the "
                 "remote server being unavailable. Continuing with stale data.",
@@ -273,7 +283,7 @@ class RepoManager:
                 self.source.branch,
                 repo_path,
                 extra={
-                    "event": "pull_error",
+                    "event": "fetch_error",
                     "source": self.source.name,
                     "branch": self.source.branch,
                     "path": str(repo_path),
@@ -333,27 +343,37 @@ class RepoManager:
         try:
             if not repo.remotes:
                 logger.debug(
-                    "Local repo '%s' at '%s' has no remotes configured; skipping pull. "
+                    "Local repo '%s' at '%s' has no remotes configured; skipping fetch. "
                     "Files will be read from the current working tree.",
                     self.source.name,
                     repo_path,
                 )
                 return False
-            fetch_infos = repo.remotes.origin.pull()
-            changed = any(fi.flags & fi.NEW_HEAD for fi in fetch_infos)
+            branch = self.source.branch or "main"
+            old_head = repo.head.commit.hexsha
+            repo.remotes.origin.fetch()
+            repo.head.reset(f"origin/{branch}", index=True, working_tree=True)
+            new_head = repo.head.commit.hexsha
+            changed = old_head != new_head
             if changed:
-                logger.info("Pulled changes for local repo '%s'.", self.source.name)
+                logger.info(
+                    "Fetched and reset local repo '%s' to origin/%s (%s -> %s).",
+                    self.source.name,
+                    branch,
+                    old_head[:8],
+                    new_head[:8],
+                )
             return changed
         except Exception:
             logger.exception(
-                "Failed to pull local repo '%s' at '%s'. "
-                "The repo exists and has remotes, but the pull operation failed. "
+                "Failed to fetch local repo '%s' at '%s'. "
+                "The repo exists and has remotes, but the fetch/reset operation failed. "
                 "This could be due to: network issues, authentication problems, "
-                "merge conflicts, or a corrupted git state. "
+                "or a corrupted git state. "
                 "Continuing with the existing (possibly stale) data.",
                 self.source.name,
                 repo_path,
-                extra={"event": "pull_error", "source": self.source.name, "path": str(repo_path)},
+                extra={"event": "fetch_error", "source": self.source.name, "path": str(repo_path)},
             )
             return False
         finally:

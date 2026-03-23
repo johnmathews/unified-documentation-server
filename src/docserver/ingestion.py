@@ -513,7 +513,7 @@ class Ingester:
         )
 
         for source in targets:
-            source_stats = {"upserted": 0, "deleted": 0, "skipped": 0, "files": 0, "errors": 0}
+            source_stats = {"upserted": 0, "deleted": 0, "skipped": 0, "new": 0, "modified": 0, "files": 0, "errors": 0}
             stats[source.name] = source_stats
 
             manager = self._managers.get(source.name)
@@ -587,9 +587,11 @@ class Ingester:
             indexed_mtimes = self.kb.get_indexed_modified_times(source.name)
             all_existing_ids = self.kb.get_all_doc_ids_for_source(source.name)
             skipped = 0
+            total_files = len(files)
+            processed = 0
 
             # 3 & 4. Parse and upsert
-            for file_path in files:
+            for file_idx, file_path in enumerate(files, 1):
                 try:
                     doc = self._parser.parse_markdown(file_path, source.name, repo_root)
                 except Exception:
@@ -618,14 +620,29 @@ class Ingester:
                     skipped += 1
                     continue
 
+                # Determine if this is a new or modified file.
+                is_new = base_doc_id not in indexed_mtimes
+                change_type = "new" if is_new else "modified"
+
                 chunks = _chunk_content(content)
                 total_chunks = len(chunks)
+                processed += 1
 
-                logger.debug(
-                    "Processing '%s': %d chunks",
-                    base_doc_id,
+                logger.info(
+                    "[%d/%d] Indexing %s file '%s' (%d chunks)",
+                    file_idx,
+                    total_files,
+                    change_type,
+                    base_metadata.get("file_path", base_doc_id),
                     total_chunks,
-                    extra={"event": "chunking", "source": source.name, "doc_id": base_doc_id},
+                    extra={
+                        "event": "indexing_file",
+                        "source": source.name,
+                        "doc_id": base_doc_id,
+                        "change_type": change_type,
+                        "chunks": total_chunks,
+                        "progress": f"{file_idx}/{total_files}",
+                    },
                 )
 
                 # Store a parent index document (no content body) so that
@@ -638,6 +655,7 @@ class Ingester:
                 try:
                     self._kb_upsert(base_doc_id, "", parent_metadata, source_stats)
                     seen_doc_ids.add(base_doc_id)
+                    source_stats[change_type] += 1
                 except Exception:
                     logger.exception(
                         "Failed to upsert index doc '%s'; skipping file.",
@@ -668,6 +686,22 @@ class Ingester:
                         )
                         source_stats["errors"] += 1
 
+            if skipped and processed:
+                logger.info(
+                    "Processed %d changed file(s), skipped %d unchanged for source '%s'",
+                    processed,
+                    skipped,
+                    source.name,
+                    extra={"event": "skip_summary", "source": source.name, "processed": processed, "skipped": skipped},
+                )
+            elif skipped and not processed:
+                logger.info(
+                    "All %d file(s) unchanged for source '%s', nothing to index",
+                    skipped,
+                    source.name,
+                    extra={"event": "skip_summary", "source": source.name, "processed": 0, "skipped": skipped},
+                )
+
             # 5. Delete stale documents
             try:
                 existing_ids = self.kb.get_all_doc_ids_for_source(source.name)
@@ -696,10 +730,11 @@ class Ingester:
 
             source_stats["skipped"] = skipped
             logger.info(
-                "Ingestion complete for source '%s': files=%d, upserted=%d, skipped=%d, deleted=%d, errors=%d",
+                "Ingestion complete for source '%s': files=%d, new=%d, modified=%d, skipped=%d, deleted=%d, errors=%d",
                 source.name,
                 source_stats["files"],
-                source_stats["upserted"],
+                source_stats["new"],
+                source_stats["modified"],
                 source_stats["skipped"],
                 source_stats["deleted"],
                 source_stats["errors"],

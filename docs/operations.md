@@ -110,6 +110,7 @@ Contents:
 | `/data/documents.db` | SQLite database (document metadata) |
 | `/data/chroma/` | ChromaDB vector store (embeddings) |
 | `/data/clones/` | Git clones of remote repos |
+| `/data/models/` | Cached ONNX embedding model (~110MB) |
 
 ### Backup
 

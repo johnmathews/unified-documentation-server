@@ -30,12 +30,17 @@ _HF_FILES = {
 def _default_model_dir() -> Path:
     """Resolve the default model cache directory.
 
-    Uses DOCSERVER_MODEL_DIR env var if set, otherwise ~/.cache/docserver/onnx_models/all-mpnet-base-v2.
-    Resolved at call time (not import time) so it respects the runtime user's HOME.
+    Precedence:
+      1. DOCSERVER_MODEL_DIR env var
+      2. /data/models (persistent volume in Docker)
+      3. ~/.cache/docserver/onnx_models/all-mpnet-base-v2 (local dev fallback)
     """
     env_dir = os.environ.get("DOCSERVER_MODEL_DIR")
     if env_dir:
         return Path(env_dir)
+    container_path = Path("/data/models/all-mpnet-base-v2")
+    if container_path.parent.parent.exists():
+        return container_path
     return Path.home() / ".cache" / "docserver" / "onnx_models" / "all-mpnet-base-v2"
 
 

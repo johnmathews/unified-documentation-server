@@ -117,17 +117,38 @@ class TestDefaultModelDir:
             result = _default_model_dir()
             assert result == Path("/custom/models")
 
-    def test_uses_home_cache_when_no_env(self) -> None:
-        with patch.dict("os.environ", {}, clear=False):
-            # Remove env var if set
-            import os
+    def test_uses_data_volume_when_available(self) -> None:
+        import os
 
-            env = os.environ.copy()
-            env.pop("DOCSERVER_MODEL_DIR", None)
-            with patch.dict("os.environ", env, clear=True):
-                result = _default_model_dir()
-                assert ".cache" in str(result)
-                assert "all-mpnet-base-v2" in str(result)
+        env = os.environ.copy()
+        env.pop("DOCSERVER_MODEL_DIR", None)
+        with patch.dict("os.environ", env, clear=True), patch(
+            "docserver.embedding.Path"
+        ) as MockPath:
+            # Simulate /data existing (container environment)
+            mock_parent = MagicMock()
+            mock_parent.parent.exists.return_value = True
+            MockPath.return_value = mock_parent
+            MockPath.home.return_value = Path.home()
+            result = _default_model_dir()
+            assert result == mock_parent
+
+    def test_uses_home_cache_when_no_data_volume(self) -> None:
+        import os
+
+        env = os.environ.copy()
+        env.pop("DOCSERVER_MODEL_DIR", None)
+        with patch.dict("os.environ", env, clear=True), patch(
+            "docserver.embedding.Path"
+        ) as MockPath:
+            # Simulate /data not existing (local dev)
+            mock_container = MagicMock()
+            mock_container.parent.parent.exists.return_value = False
+            MockPath.return_value = mock_container
+            MockPath.home.return_value = Path.home()
+            result = _default_model_dir()
+            assert ".cache" in str(result)
+            assert "all-mpnet-base-v2" in str(result)
 
 
 class TestImportErrors:

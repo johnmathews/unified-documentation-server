@@ -98,7 +98,7 @@ Key log events (filter with `grep '"event":'`):
 | `local_path_not_dir` | `source`, `path` | Local source path is not a directory |
 | `invalid_clone` | `source`, `path` | Clone directory exists but is not a valid git repo |
 | `fetch_error` | `source`, `branch`, `path` | Fetch or reset failed (network, auth, branch, or corruption) |
-| `corrupt_head` | `source`, `path` | HEAD unreadable due to corrupt refs — will attempt recovery via fetch+reset |
+| `corrupt_head` | `source`, `path` | HEAD unreadable due to corrupt refs — clone will be deleted and re-cloned |
 | `no_files_matched` | `source`, `path`, `patterns`, `top_level_contents`, `found_doc_dirs` | Detailed diagnostics when glob patterns match nothing |
 | `files_found` | `source`, `file_count` | Files matched by glob patterns |
 | `indexing_file` | `source`, `doc_id`, `change_type`, `chunks`, `progress` | Per-file progress: `[3/24] Indexing new file 'docs/setup.md' (5 chunks)` |

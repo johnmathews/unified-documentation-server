@@ -11,4 +11,9 @@ venv/
 config/sources.yaml
 /data/
 .coverage
+htmlcov/
+*.key
+*.pem
+*.secret
+credentials.json
 .engineering-team/

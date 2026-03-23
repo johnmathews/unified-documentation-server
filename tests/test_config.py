@@ -3,9 +3,8 @@
 import os
 import tempfile
 
-import yaml
-
 import pytest
+import yaml
 
 from docserver.config import Config, RepoSource, _expand_env_vars, load_config
 

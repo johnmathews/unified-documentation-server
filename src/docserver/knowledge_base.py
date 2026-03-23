@@ -111,10 +111,8 @@ class KnowledgeBase:
     def _run_migrations(conn: sqlite3.Connection) -> None:
         """Apply schema migrations idempotently."""
         for sql in _MIGRATIONS:
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute(sql)
-            except sqlite3.OperationalError:
-                pass  # Column/index already exists
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)

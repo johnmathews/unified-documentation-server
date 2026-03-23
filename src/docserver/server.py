@@ -56,8 +56,9 @@ def create_mcp(config: Config) -> FastMCP:
             return JSONResponse(
                 {
                     "status": "ok",
-                    "sources": len(summary),
+                    "total_sources": len(summary),
                     "total_chunks": sum(s.get("chunk_count", 0) for s in summary),
+                    "sources": summary,
                 }
             )
         except Exception:

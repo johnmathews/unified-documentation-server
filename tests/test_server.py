@@ -193,8 +193,10 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "ok"
-        assert "sources" in body
+        assert "total_sources" in body
         assert "total_chunks" in body
+        assert "sources" in body
+        assert isinstance(body["sources"], list)
 
     def test_health_returns_503_on_error(self, app) -> None:
         """GET /health should return 503 when KB raises."""

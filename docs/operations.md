@@ -4,11 +4,36 @@
 
 ### Health Endpoint
 
-`GET :8080/health` returns JSON with the current indexing status:
+`GET :8080/health` returns JSON with the current indexing status and per-source breakdown:
 
 ```json
-{"status": "ok", "sources": 3, "total_chunks": 542}
+{
+  "status": "ok",
+  "total_sources": 2,
+  "total_chunks": 150,
+  "sources": [
+    {
+      "source": "home-server-docs",
+      "file_count": 12,
+      "chunk_count": 85,
+      "last_indexed": "2026-03-23T10:00:00"
+    },
+    {
+      "source": "nanoclaw",
+      "file_count": 5,
+      "chunk_count": 65,
+      "last_indexed": "2026-03-23T10:00:00"
+    }
+  ]
+}
 ```
+
+Each source entry includes:
+
+- `source` -- source name from `sources.yaml`
+- `file_count` -- number of parent documents (markdown files)
+- `chunk_count` -- number of indexed chunks
+- `last_indexed` -- timestamp of the most recent indexing for that source
 
 Returns **503** with `{"status": "error"}` if the knowledge base is unreachable.
 

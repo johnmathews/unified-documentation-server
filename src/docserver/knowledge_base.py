@@ -411,6 +411,95 @@ class KnowledgeBase:
             rows = conn.execute("SELECT DISTINCT source FROM documents").fetchall()
         return {row["source"] for row in rows}
 
+    def get_document_tree(self) -> list[dict[str, Any]]:
+        """Return documents organized as a tree: source → category → documents.
+
+        Categories are 'docs' and 'journal', determined by file_path patterns.
+        Returns parent documents only (no chunks).
+        """
+        sql = """
+            SELECT doc_id, source, file_path, title, created_at, modified_at, size_bytes
+            FROM documents
+            WHERE is_chunk = FALSE OR chunk_index IS NULL
+            ORDER BY source, file_path
+        """
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+
+        sources: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for row in rows:
+            doc = dict(row)
+            source = doc["source"]
+            fp = doc.get("file_path", "")
+
+            if "journal/" in fp or "journal\\" in fp:
+                category = "journal"
+            else:
+                category = "docs"
+
+            if source not in sources:
+                sources[source] = {"docs": [], "journal": []}
+            sources[source][category].append(doc)
+
+        tree = []
+        for source_name in sorted(sources):
+            cats = sources[source_name]
+            tree.append(
+                {
+                    "source": source_name,
+                    "docs": sorted(cats["docs"], key=lambda d: d.get("title") or d.get("file_path", "")),
+                    "journal": sorted(
+                        cats["journal"],
+                        key=lambda d: d.get("created_at") or d.get("file_path", ""),
+                        reverse=True,
+                    ),
+                }
+            )
+        return tree
+
+    def search_documents(
+        self,
+        query: str,
+        n_results: int = 20,
+        source_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search and return parent document metadata (deduplicated from chunk hits).
+
+        Uses ChromaDB for semantic search on chunks, then maps back to parent docs.
+        """
+        search_results = self.search(query, n_results=n_results * 2, source_filter=source_filter)
+
+        seen_parents: set[str] = set()
+        parent_docs: list[dict[str, Any]] = []
+
+        for result in search_results:
+            doc_id = result["doc_id"]
+            parent_id = doc_id.split("#chunk")[0] if "#chunk" in doc_id else doc_id
+
+            if parent_id in seen_parents:
+                continue
+            seen_parents.add(parent_id)
+
+            doc = self.get_document(parent_id)
+            if doc:
+                parent_docs.append(
+                    {
+                        "doc_id": doc["doc_id"],
+                        "source": doc["source"],
+                        "file_path": doc["file_path"],
+                        "title": doc["title"],
+                        "created_at": doc["created_at"],
+                        "modified_at": doc["modified_at"],
+                        "score": result["score"],
+                        "snippet": result["content"][:200],
+                    }
+                )
+
+            if len(parent_docs) >= n_results:
+                break
+
+        return parent_docs
+
     def get_sources_summary(self) -> list[SourceSummary]:
         """Return per-source summary: source, file_count, chunk_count, last_indexed."""
         sql = """

@@ -6,8 +6,10 @@ import json
 import logging
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
+import anthropic
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
@@ -35,6 +37,19 @@ def _get_kb() -> KnowledgeBase:
 def _get_ingester() -> Ingester:
     assert _ingester is not None, "Server not initialized — call init_app() first"
     return _ingester
+
+
+def _cors_json(data: Any, status_code: int = 200) -> JSONResponse:
+    """Return a JSONResponse with CORS headers for the UI."""
+    return JSONResponse(
+        data,
+        status_code=status_code,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        },
+    )
 
 
 def create_mcp(config: Config) -> FastMCP:
@@ -87,6 +102,129 @@ def create_mcp(config: Config) -> FastMCP:
         except Exception:
             logger.exception("Rescan failed.")
             return JSONResponse({"status": "error"}, status_code=500)
+
+    # ---- REST API for Web UI -------------------------------------------
+
+    @server.custom_route("/api/tree", methods=["GET"])
+    async def api_tree(request: Request) -> JSONResponse:
+        """Return document tree: sources → categories → documents."""
+        try:
+            kb = _get_kb()
+            tree = kb.get_document_tree()
+            return _cors_json(tree)
+        except Exception:
+            logger.exception("API tree failed.")
+            return _cors_json({"error": "Internal error"}, 500)
+
+    @server.custom_route("/api/documents/{doc_id:path}", methods=["GET"])
+    async def api_get_document(request: Request) -> JSONResponse:
+        """Return a single document by ID (URL-encoded)."""
+        try:
+            kb = _get_kb()
+            doc_id = unquote(request.path_params["doc_id"])
+            doc = kb.get_document(doc_id)
+            if doc is None:
+                return _cors_json({"error": "Not found"}, 404)
+            return _cors_json(doc)
+        except Exception:
+            logger.exception("API get_document failed.")
+            return _cors_json({"error": "Internal error"}, 500)
+
+    @server.custom_route("/api/search", methods=["GET"])
+    async def api_search(request: Request) -> JSONResponse:
+        """Search documents. Query params: q (required), source (optional), limit (optional)."""
+        try:
+            kb = _get_kb()
+            query = request.query_params.get("q", "")
+            if not query:
+                return _cors_json({"error": "Missing 'q' parameter"}, 400)
+            source = request.query_params.get("source", "") or None
+            limit = min(int(request.query_params.get("limit", "20")), 100)
+            results = kb.search_documents(query, n_results=limit, source_filter=source)
+            return _cors_json(results)
+        except Exception:
+            logger.exception("API search failed.")
+            return _cors_json({"error": "Internal error"}, 500)
+
+    @server.custom_route("/api/chat", methods=["POST", "OPTIONS"])
+    async def api_chat(request: Request) -> JSONResponse:
+        """Chat endpoint: RAG search + Claude API. Body: {message, doc_id?, history?}."""
+        if request.method == "OPTIONS":
+            return _cors_json({})
+
+        try:
+            kb = _get_kb()
+            body = await request.json()
+            message = body.get("message", "")
+            if not message:
+                return _cors_json({"error": "Missing 'message'"}, 400)
+
+            current_doc_id = body.get("doc_id")
+            history: list[dict[str, str]] = body.get("history", [])
+
+            # Build context from current page + RAG search
+            context_parts: list[str] = []
+
+            if current_doc_id:
+                current_doc = kb.get_document(current_doc_id)
+                if current_doc:
+                    context_parts.append(
+                        f"The user is currently viewing this document:\n"
+                        f"Title: {current_doc.get('title', 'Untitled')}\n"
+                        f"Source: {current_doc.get('source', '?')}\n"
+                        f"Path: {current_doc.get('file_path', '?')}\n\n"
+                        f"{current_doc.get('content', '')}"
+                    )
+
+            search_results = kb.search(query=message, n_results=5)
+            if search_results:
+                rag_context = "\n\n---\n\n".join(
+                    f"**{r['metadata'].get('title', 'Untitled')}** "
+                    f"(source: {r['metadata'].get('source', '?')}, "
+                    f"file: {r['metadata'].get('file_path', '?')})\n\n"
+                    f"{r['content']}"
+                    for r in search_results
+                )
+                context_parts.append(f"Relevant documentation excerpts:\n\n{rag_context}")
+
+            system_prompt = (
+                "You are a helpful documentation assistant. Answer questions using the provided "
+                "documentation context. If the documentation doesn't contain enough information "
+                "to fully answer the question, say so clearly and provide what help you can "
+                "from your general knowledge. Be concise and direct."
+            )
+            if context_parts:
+                system_prompt += "\n\n" + "\n\n---\n\n".join(context_parts)
+
+            # Build messages from history + current
+            messages: list[dict[str, str]] = []
+            for h in history[-10:]:  # Keep last 10 exchanges
+                messages.append({"role": h["role"], "content": h["content"]})
+            messages.append({"role": "user", "content": message})
+
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                return _cors_json(
+                    {"error": "ANTHROPIC_API_KEY not configured on server"}, 503
+                )
+
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2048,
+                system=system_prompt,
+                messages=messages,
+            )
+
+            reply = response.content[0].text if response.content else ""
+            return _cors_json({"reply": reply})
+
+        except anthropic.APIError as exc:
+            logger.exception("Anthropic API error in chat.")
+            return _cors_json({"error": f"AI service error: {exc.message}"}, 502)
+        except Exception:
+            logger.exception("API chat failed.")
+            return _cors_json({"error": "Internal error"}, 500)
 
     # ---- Tools ----------------------------------------------------------
 

@@ -329,6 +329,85 @@ def test_rename_source_empty(kb):
     assert kb.rename_source("nonexistent", "new") == 0
 
 
+def test_get_document_tree(kb):
+    """get_document_tree should organize docs by source and category."""
+    kb.upsert_document(
+        "alpha:docs/setup.md",
+        "",
+        {"source": "alpha", "file_path": "docs/setup.md", "title": "Setup", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "alpha:journal/250101-init.md",
+        "",
+        {
+            "source": "alpha",
+            "file_path": "journal/250101-init.md",
+            "title": "Init",
+            "is_chunk": False,
+            "created_at": "2025-01-01T00:00:00",
+        },
+    )
+    kb.upsert_document(
+        "beta:docs/readme.md",
+        "",
+        {"source": "beta", "file_path": "docs/readme.md", "title": "README", "is_chunk": False},
+    )
+    # Chunks should be excluded
+    kb.upsert_document(
+        "alpha:docs/setup.md#chunk0",
+        "content",
+        {"source": "alpha", "file_path": "docs/setup.md", "chunk_index": 0, "is_chunk": True},
+    )
+
+    tree = kb.get_document_tree()
+    assert len(tree) == 2
+    assert tree[0]["source"] == "alpha"
+    assert len(tree[0]["docs"]) == 1
+    assert len(tree[0]["journal"]) == 1
+    assert tree[0]["docs"][0]["title"] == "Setup"
+    assert tree[0]["journal"][0]["title"] == "Init"
+    assert tree[1]["source"] == "beta"
+    assert len(tree[1]["docs"]) == 1
+
+
+def test_search_documents_deduplicates(kb):
+    """search_documents should deduplicate chunks to parent docs."""
+    kb.upsert_document(
+        "src:guide.md",
+        "Full guide content about Python programming",
+        {"source": "src", "file_path": "guide.md", "title": "Guide", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "src:guide.md#chunk0",
+        "Python programming basics and fundamentals",
+        {
+            "source": "src",
+            "file_path": "guide.md",
+            "title": "Guide",
+            "chunk_index": 0,
+            "total_chunks": 2,
+            "is_chunk": True,
+        },
+    )
+    kb.upsert_document(
+        "src:guide.md#chunk1",
+        "Advanced Python programming patterns",
+        {
+            "source": "src",
+            "file_path": "guide.md",
+            "title": "Guide",
+            "chunk_index": 1,
+            "total_chunks": 2,
+            "is_chunk": True,
+        },
+    )
+
+    results = kb.search_documents("Python programming")
+    # Should only get one result (the parent doc), not two chunk hits
+    parent_ids = [r["doc_id"] for r in results]
+    assert parent_ids.count("src:guide.md") == 1
+
+
 def test_delete_source_documents(kb):
     """delete_source_documents should remove only the targeted source's docs."""
     # Upsert docs for two sources

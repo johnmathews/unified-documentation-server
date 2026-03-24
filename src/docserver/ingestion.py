@@ -1048,8 +1048,9 @@ class Ingester:
                     },
                 )
 
-                # Store a parent index document (no content body) so that
-                # structured queries (e.g. "when was X created") work.
+                # Store parent document with full content so the UI can serve
+                # the original document.  Chunks are still stored separately
+                # for vector search.
                 parent_metadata = {
                     **base_metadata,
                     "total_chunks": total_chunks,
@@ -1057,7 +1058,7 @@ class Ingester:
                     "content_hash": content_hash,
                 }
                 try:
-                    self._kb_upsert(base_doc_id, "", parent_metadata, source_stats)
+                    self._kb_upsert(base_doc_id, content, parent_metadata, source_stats)
                     seen_doc_ids.add(base_doc_id)
                     source_stats[change_type] += 1
                 except Exception:

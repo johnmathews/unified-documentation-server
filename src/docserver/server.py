@@ -122,7 +122,7 @@ def create_mcp(config: Config) -> FastMCP:
         try:
             kb = _get_kb()
             doc_id = unquote(request.path_params["doc_id"])
-            doc = kb.get_full_document(doc_id)
+            doc = kb.get_document(doc_id)
             if doc is None:
                 return _cors_json({"error": "Not found"}, 404)
             return _cors_json(doc)

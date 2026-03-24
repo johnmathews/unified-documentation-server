@@ -124,7 +124,7 @@ def create_mcp(config: Config) -> FastMCP:
             thread = threading.Thread(target=_run_rescan, daemon=True)
             thread.start()
 
-            return JSONResponse({"status": "started", "force": force, "sources": sources})
+            return JSONResponse({"status": "started", "force": force, "sources": sources or "all"})
         except Exception:
             logger.exception("Rescan failed to start.")
             return JSONResponse({"status": "error"}, status_code=500)

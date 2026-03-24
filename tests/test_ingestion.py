@@ -225,6 +225,25 @@ class TestRepoManager:
         filenames = {f.name for f in files}
         assert filenames == {"readme.md", "notes.md"}
 
+    def test_get_files_includes_readme_with_custom_patterns(self, tmp_path: Path) -> None:
+        """get_files should always include root README.md even with custom patterns."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project")
+        docs_dir = repo_dir / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "guide.md").write_text("# Guide")
+
+        source = RepoSource(
+            name="custom", path=str(repo_dir), glob_patterns=["docs/**/*.md"]
+        )
+        manager = RepoManager(source, str(tmp_path / "clones"))
+        files = manager.get_files()
+
+        filenames = {f.name for f in files}
+        assert "README.md" in filenames
+        assert "guide.md" in filenames
+
     def test_get_files_missing_dir(self, tmp_path: Path) -> None:
         """get_files should return an empty list when path doesn't exist."""
         source = RepoSource(name="missing", path=str(tmp_path / "nonexistent"))

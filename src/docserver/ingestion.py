@@ -133,6 +133,23 @@ class RepoManager:
                 if p not in matched:
                     matched.append(p)
 
+        # Always include root-level README files even when custom patterns
+        # are specified — README.md is the canonical project overview.
+        for name in ("README.md", "readme.md", "Readme.md"):
+            readme = root / name
+            if not readme.is_file():
+                continue
+            # Check if this file is already matched (handles case-insensitive FS)
+            already = any(readme.samefile(p) for p in matched if p.is_file())
+            if not already:
+                matched.append(readme)
+                logger.debug(
+                    "Source '%s': auto-included root-level '%s'",
+                    self.source.name,
+                    name,
+                )
+                break  # Only include one README variant
+
         if not matched:
             # Provide detailed diagnostics when no files match
             try:

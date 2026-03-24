@@ -362,12 +362,47 @@ def test_get_document_tree(kb):
     tree = kb.get_document_tree()
     assert len(tree) == 2
     assert tree[0]["source"] == "alpha"
+    assert len(tree[0]["root_docs"]) == 0
     assert len(tree[0]["docs"]) == 1
     assert len(tree[0]["journal"]) == 1
     assert tree[0]["docs"][0]["title"] == "Setup"
     assert tree[0]["journal"][0]["title"] == "Init"
     assert tree[1]["source"] == "beta"
     assert len(tree[1]["docs"]) == 1
+
+
+def test_get_document_tree_root_docs(kb):
+    """Root-level files (no directory) should appear in root_docs category."""
+    kb.upsert_document(
+        "proj:README.md",
+        "",
+        {"source": "proj", "file_path": "README.md", "title": "Project README", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "proj:docs/guide.md",
+        "",
+        {"source": "proj", "file_path": "docs/guide.md", "title": "Guide", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "proj:journal/250301-entry.md",
+        "",
+        {
+            "source": "proj",
+            "file_path": "journal/250301-entry.md",
+            "title": "Entry",
+            "is_chunk": False,
+            "created_at": "2025-03-01T00:00:00",
+        },
+    )
+
+    tree = kb.get_document_tree()
+    assert len(tree) == 1
+    src = tree[0]
+    assert src["source"] == "proj"
+    assert len(src["root_docs"]) == 1
+    assert src["root_docs"][0]["title"] == "Project README"
+    assert len(src["docs"]) == 1
+    assert len(src["journal"]) == 1
 
 
 def test_get_full_document_reassembles_chunks(kb):

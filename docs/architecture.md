@@ -47,7 +47,7 @@ The ingestion layer manages git repositories and converts markdown files into se
 - **Ingester**: Orchestrates the full cycle via APScheduler. On each tick:
   1. Clean up orphaned sources — detects renames via URL matching before deleting (see below)
   2. Sync all repos in parallel using a thread pool (clone on first run, then fetch + hard reset to match remote)
-  3. Enumerate files matching glob patterns (default: `**/*.md` — all markdown files in the entire repo)
+  3. Enumerate files matching glob patterns (default: `**/*.md` — all markdown files in the entire repo). Root-level `README.md` files are always included even when custom patterns are specified.
   4. Bulk-fetch git creation dates for all files in a single `git log` call (with per-file fallback for renamed files)
   5. Compare SHA-256 content hash against stored hash — skip unchanged files
   6. Parse and chunk changed files
@@ -142,6 +142,10 @@ Built with FastMCP, exposes five tools over streamable HTTP:
 - `/mcp` — MCP protocol endpoint (streamable HTTP transport)
 - `/health` — Health check returning status, total source/chunk counts, and per-source breakdown (file count, chunk count, last indexed time)
 - `/rescan` (POST) — Trigger an immediate ingestion cycle. Optional `?source=name` query param to rescan a single source. Returns stats with duration.
+- `/api/tree` (GET) — Document tree organized by source and category. Each source has `root_docs` (root-level files like README.md), `docs` (files in subdirectories), and `journal` (files under journal/).
+- `/api/documents/:doc_id` (GET) — Full document content reassembled from chunks.
+- `/api/search?q=&source=&limit=` (GET) — Semantic search via ChromaDB.
+- `/api/chat` (POST) — RAG-powered chat (searches docs, sends context to Claude).
 
 ### Logging
 

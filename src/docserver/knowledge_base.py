@@ -550,10 +550,17 @@ class KnowledgeBase:
             source = doc["source"]
             fp = doc.get("file_path", "")
 
-            category = "journal" if "journal/" in fp or "journal\\" in fp else "docs"
+            if "journal/" in fp or "journal\\" in fp:
+                category = "journal"
+            elif "/" in fp or "\\" in fp:
+                # File is inside a subdirectory (e.g. docs/foo.md)
+                category = "docs"
+            else:
+                # Root-level file (e.g. README.md)
+                category = "root_docs"
 
             if source not in sources:
-                sources[source] = {"docs": [], "journal": []}
+                sources[source] = {"root_docs": [], "docs": [], "journal": []}
             sources[source][category].append(doc)
 
         tree = []
@@ -562,6 +569,9 @@ class KnowledgeBase:
             tree.append(
                 {
                     "source": source_name,
+                    "root_docs": sorted(
+                        cats["root_docs"], key=lambda d: d.get("title") or d.get("file_path", "")
+                    ),
                     "docs": sorted(cats["docs"], key=lambda d: d.get("title") or d.get("file_path", "")),
                     "journal": sorted(
                         cats["journal"],

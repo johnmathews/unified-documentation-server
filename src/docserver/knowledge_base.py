@@ -432,10 +432,7 @@ class KnowledgeBase:
             source = doc["source"]
             fp = doc.get("file_path", "")
 
-            if "journal/" in fp or "journal\\" in fp:
-                category = "journal"
-            else:
-                category = "docs"
+            category = "journal" if "journal/" in fp or "journal\\" in fp else "docs"
 
             if source not in sources:
                 sources[source] = {"docs": [], "journal": []}

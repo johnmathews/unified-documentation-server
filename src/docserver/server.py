@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
@@ -82,26 +83,50 @@ def create_mcp(config: Config) -> FastMCP:
 
     # ---- Rescan endpoint ------------------------------------------------
 
+    _rescan_lock = threading.Lock()
+    _rescan_running = False
+
     @server.custom_route("/rescan", methods=["POST"])
     async def rescan(request: Request) -> JSONResponse:
-        """Trigger an immediate ingestion cycle. Optionally pass ?source=name&force=true."""
+        """Trigger a background ingestion cycle. Optionally pass ?source=name&force=true."""
+        nonlocal _rescan_running
         try:
+            if _rescan_running:
+                return JSONResponse({"status": "already_running"}, status_code=409)
+
             ingester = _get_ingester()
             source = request.query_params.get("source", "")
             force = request.query_params.get("force", "").lower() == "true"
             sources = [source] if source else None
-            t0 = time.monotonic()
-            stats = ingester.run_once(sources=sources, force=force)
-            duration_ms = int((time.monotonic() - t0) * 1000)
-            logger.info(
-                "Rescan completed in %dms: %s",
-                duration_ms,
-                stats,
-                extra={"event": "rescan", "duration_ms": duration_ms, "stats": stats},
-            )
-            return JSONResponse({"status": "ok", "duration_ms": duration_ms, "stats": stats})
+
+            def _run_rescan() -> None:
+                nonlocal _rescan_running
+                try:
+                    t0 = time.monotonic()
+                    stats = ingester.run_once(sources=sources, force=force)
+                    duration_ms = int((time.monotonic() - t0) * 1000)
+                    logger.info(
+                        "Rescan completed in %dms: %s",
+                        duration_ms,
+                        stats,
+                        extra={"event": "rescan", "duration_ms": duration_ms, "stats": stats},
+                    )
+                except Exception:
+                    logger.exception("Rescan failed.")
+                finally:
+                    _rescan_running = False
+
+            with _rescan_lock:
+                if _rescan_running:
+                    return JSONResponse({"status": "already_running"}, status_code=409)
+                _rescan_running = True
+
+            thread = threading.Thread(target=_run_rescan, daemon=True)
+            thread.start()
+
+            return JSONResponse({"status": "started", "force": force, "sources": sources})
         except Exception:
-            logger.exception("Rescan failed.")
+            logger.exception("Rescan failed to start.")
             return JSONResponse({"status": "error"}, status_code=500)
 
     # ---- REST API for Web UI -------------------------------------------

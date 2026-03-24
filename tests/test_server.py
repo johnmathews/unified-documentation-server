@@ -221,30 +221,35 @@ class TestHealthEndpoint:
 
 
 class TestRescanEndpoint:
-    def test_rescan_returns_ok(self, app) -> None:
-        """POST /rescan should trigger ingestion and return stats."""
+    def test_rescan_starts_background(self, app) -> None:
+        """POST /rescan should start ingestion in the background and return immediately."""
         starlette_app = app.streamable_http_app()
         client = TestClient(starlette_app)
         response = client.post("/rescan")
         assert response.status_code == 200
         body = response.json()
-        assert body["status"] == "ok"
-        assert "duration_ms" in body
-        assert "stats" in body
+        assert body["status"] == "started"
 
-    def test_rescan_returns_500_on_error(self, app) -> None:
-        """POST /rescan should return 500 when ingestion raises."""
+    def test_rescan_rejects_concurrent(self, app) -> None:
+        """POST /rescan should return 409 if a rescan is already running."""
+        import time as _time
+
         starlette_app = app.streamable_http_app()
         client = TestClient(starlette_app)
 
-        with patch.object(
-            server_module._get_ingester(), "run_once", side_effect=RuntimeError("boom")
-        ):
-            response = client.post("/rescan")
+        # Make run_once block long enough to test concurrency
+        original_run_once = server_module._get_ingester().run_once
 
-        assert response.status_code == 500
-        body = response.json()
-        assert body["status"] == "error"
+        def slow_run_once(**kwargs: object) -> dict:
+            _time.sleep(0.5)
+            return original_run_once(**kwargs)
+
+        with patch.object(server_module._get_ingester(), "run_once", side_effect=slow_run_once):
+            first = client.post("/rescan")
+            assert first.status_code == 200
+            second = client.post("/rescan")
+            assert second.status_code == 409
+            assert second.json()["status"] == "already_running"
 
 
 class TestInputValidation:

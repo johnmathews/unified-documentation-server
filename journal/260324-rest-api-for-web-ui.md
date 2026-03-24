@@ -33,4 +33,10 @@ Added 2 new tests to `test_knowledge_base.py`:
 - `test_get_document_tree` — Verifies tree structure, category assignment, and chunk exclusion
 - `test_search_documents_deduplicates` — Verifies chunk results are deduplicated to parent docs
 
-All 138 tests pass. KB coverage improved from 80% to 95%.
+All 140 tests pass. KB coverage improved from 80% to 95%.
+
+## Follow-up fixes (same session)
+
+- **Parent docs now store full content** — Previously parent docs had empty content (only chunks had text). Changed ingestion to pass the full markdown content to parent doc upserts. This means the UI serves the exact original document instead of a reconstruction from chunks.
+- **Force rescan** — Added `?force=true` parameter to `/rescan` endpoint, bypassing the content hash check. Needed when the storage format changes but file content hasn't.
+- **`get_full_document()`** — Added as a fallback method that reassembles content from chunks for any parent docs that were indexed before the content storage change. The API endpoint uses `get_document()` directly since new ingestion stores content on parents.

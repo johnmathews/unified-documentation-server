@@ -861,12 +861,13 @@ class Ingester:
 
         return count
 
-    def run_once(self, sources: list[str] | None = None) -> dict[str, dict[str, int]]:
+    def run_once(self, sources: list[str] | None = None, *, force: bool = False) -> dict[str, dict[str, int]]:
         """Run a full ingestion cycle across configured sources.
 
         Args:
             sources: Optional list of source names to restrict ingestion to.
                      If None or empty, all configured sources are ingested.
+            force: If True, re-index all files regardless of content hash.
 
         For each source:
           1. Sync the repo (clone/pull).
@@ -1014,7 +1015,7 @@ class Ingester:
 
                 # Skip files whose content hasn't changed since last indexing.
                 prev_hash = indexed_hashes.get(base_doc_id)
-                if prev_hash and prev_hash == content_hash:
+                if not force and prev_hash and prev_hash == content_hash:
                     # Mark all existing IDs as seen so they aren't pruned.
                     seen_doc_ids.add(base_doc_id)
                     for eid in all_existing_ids:

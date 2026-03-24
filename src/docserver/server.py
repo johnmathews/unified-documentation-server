@@ -84,13 +84,14 @@ def create_mcp(config: Config) -> FastMCP:
 
     @server.custom_route("/rescan", methods=["POST"])
     async def rescan(request: Request) -> JSONResponse:
-        """Trigger an immediate ingestion cycle. Optionally pass ?source=name."""
+        """Trigger an immediate ingestion cycle. Optionally pass ?source=name&force=true."""
         try:
             ingester = _get_ingester()
             source = request.query_params.get("source", "")
+            force = request.query_params.get("force", "").lower() == "true"
             sources = [source] if source else None
             t0 = time.monotonic()
-            stats = ingester.run_once(sources=sources)
+            stats = ingester.run_once(sources=sources, force=force)
             duration_ms = int((time.monotonic() - t0) * 1000)
             logger.info(
                 "Rescan completed in %dms: %s",

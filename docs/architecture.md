@@ -129,13 +129,14 @@ Only chunks are stored in ChromaDB. Parent docs are excluded since they have no 
 
 Built with FastMCP, exposes five tools over streamable HTTP:
 
-| Tool | Use Case |
-|------|----------|
-| `search_docs` | Natural language questions ("what ports does VM X use?") |
-| `query_docs` | Structured filters (source, path, title, date range) |
-| `get_document` | Retrieve a specific document by its ID |
-| `list_sources` | Show all sources with file/chunk counts and last indexed time |
-| `reindex` | Trigger an immediate ingestion cycle |
+| Tool               | Use Case                                                          |
+|--------------------|-------------------------------------------------------------------|
+| `search_docs`      | Natural language questions ("what ports does VM X use?")          |
+| `query_docs`       | Structured filters (source, path, title, date range)              |
+| `get_document`     | Retrieve a specific document by its ID                            |
+| `list_sources`     | Show all sources with file/chunk counts and last indexed time     |
+| `ingestion_status` | Full indexing status: configured vs indexed sources, missing gaps |
+| `reindex`          | Trigger an immediate ingestion cycle                              |
 
 ### Endpoints
 

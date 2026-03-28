@@ -202,19 +202,43 @@ def create_mcp(config: Config) -> FastMCP:
                         f"{current_doc.get('content', '')}"
                     )
 
-            # Add document inventory so the LLM knows what exists
+            # Add document inventory with indexing stats
             doc_tree = kb.get_document_tree()
+            source_stats = {s["source"]: s for s in kb.get_sources_summary()}
             inventory_lines: list[str] = []
+            total_files = 0
+            total_chunks = 0
             for src in doc_tree:
                 src_name = src["source"]
+                stats = source_stats.get(src_name, {})
+                file_count = stats.get("file_count", 0)
+                chunk_count = stats.get("chunk_count", 0)
+                last_indexed = stats.get("last_indexed", "never")
+                total_files += file_count
+                total_chunks += chunk_count
+
+                root_docs = [d.get("title") or d.get("file_path", "?") for d in src.get("root_docs", [])]
                 doc_titles = [d.get("title") or d.get("file_path", "?") for d in src["docs"]]
                 journal_titles = [d.get("title") or d.get("file_path", "?") for d in src["journal"]]
-                inventory_lines.append(f"**{src_name}**:")
+                eng_titles = [d.get("title") or d.get("file_path", "?") for d in src.get("engineering_team", [])]
+
+                inventory_lines.append(
+                    f"**{src_name}** ({file_count} files, {chunk_count} chunks, last indexed: {last_indexed}):"
+                )
+                if root_docs:
+                    inventory_lines.append(f"  Root docs ({len(root_docs)}): {', '.join(root_docs)}")
                 if doc_titles:
                     inventory_lines.append(f"  Documentation ({len(doc_titles)}): {', '.join(doc_titles)}")
                 if journal_titles:
                     inventory_lines.append(f"  Journal ({len(journal_titles)}): {', '.join(journal_titles)}")
-            context_parts.insert(0, "Available documentation sources and documents:\n\n" + "\n".join(inventory_lines))
+                if eng_titles:
+                    inventory_lines.append(f"  Engineering team ({len(eng_titles)}): {', '.join(eng_titles)}")
+
+            inventory_header = (
+                f"Documentation inventory: {len(doc_tree)} sources, "
+                f"{total_files} files, {total_chunks} vector chunks.\n\n"
+            )
+            context_parts.insert(0, inventory_header + "\n".join(inventory_lines))
 
             search_results = kb.search(query=message, n_results=8)
             if search_results:
@@ -228,12 +252,20 @@ def create_mcp(config: Config) -> FastMCP:
                 context_parts.append(f"Relevant documentation excerpts:\n\n{rag_context}")
 
             system_prompt = (
-                "You are a helpful documentation assistant. You have access to a complete "
-                "inventory of all documentation sources and their documents. Answer questions "
-                "using the provided documentation context. For structural questions (e.g. "
-                "'what journal entries exist'), use the document inventory. If the documentation "
-                "doesn't contain enough information to fully answer the question, say so clearly "
-                "and provide what help you can from your general knowledge. Be concise and direct."
+                "You are a documentation assistant for a home server infrastructure project. "
+                "You have full access to the indexed documentation inventory below, including "
+                "per-source file counts, chunk counts, and last-indexed timestamps.\n\n"
+                "Guidelines:\n"
+                "- For questions about what's indexed, source status, or document counts, "
+                "use the inventory stats provided below — you have complete information.\n"
+                "- For questions about document content, use the search results below.\n"
+                "- For structural questions ('what journal entries exist', 'which sources are "
+                "indexed'), use the document inventory.\n"
+                "- When asked about the most recent journal entry, look at the created_at dates "
+                "in the inventory and search results.\n"
+                "- Answer confidently from the data you have. Do not say 'I would need to use "
+                "tools' or 'I cannot confirm' when the answer is in the inventory.\n"
+                "- Be concise and direct."
             )
             if context_parts:
                 system_prompt += "\n\n" + "\n\n---\n\n".join(context_parts)
@@ -383,6 +415,33 @@ def create_mcp(config: Config) -> FastMCP:
             return "No sources have been indexed yet."
 
         return json.dumps(summary, indent=2, default=str)
+
+    @server.tool()
+    def ingestion_status() -> str:
+        """Get detailed indexing status for all documentation sources.
+
+        Returns per-source stats including file counts, chunk counts,
+        last indexed time, and configured source names. Use this to
+        answer questions about whether sources are fully indexed.
+        """
+        kb = _get_kb()
+        summary = kb.get_sources_summary()
+        configured = [s.name for s in config.sources]
+
+        indexed_names = {s["source"] for s in summary}
+        missing = [n for n in configured if n not in indexed_names]
+
+        result = {
+            "configured_sources": configured,
+            "indexed_sources": summary,
+            "total_files": sum(s.get("file_count", 0) for s in summary),
+            "total_chunks": sum(s.get("chunk_count", 0) for s in summary),
+            "missing_sources": missing,
+            "fully_indexed": len(missing) == 0 and all(
+                s.get("file_count", 0) > 0 for s in summary
+            ),
+        }
+        return json.dumps(result, indent=2, default=str)
 
     @server.tool()
     def reindex(source: str = "") -> str:

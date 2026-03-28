@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 import anthropic
 from mcp.server.fastmcp import FastMCP
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
 
 from docserver.config import Config, load_config
 
@@ -249,6 +251,56 @@ def create_mcp(config: Config) -> FastMCP:
             return _cors_json(doc)
         except Exception:
             logger.exception("API get_document failed.")
+            return _cors_json({"error": "Internal error"}, 500)
+
+    @server.custom_route("/api/files/{doc_id:path}", methods=["GET"])
+    async def api_get_file(request: Request) -> JSONResponse | FileResponse:
+        """Serve a raw file from disk by doc_id (e.g. for PDFs)."""
+        try:
+            kb = _get_kb()
+            doc_id = unquote(request.path_params["doc_id"])
+            doc = kb.get_document(doc_id)
+            if doc is None:
+                return _cors_json({"error": "Not found"}, 404)
+
+            source_name = doc["source"]
+            file_path = doc["file_path"]
+
+            # Find the matching source config to resolve the repo root.
+            repo_source = None
+            for src in config.sources:
+                if src.name == source_name:
+                    repo_source = src
+                    break
+            if repo_source is None:
+                return _cors_json({"error": "Source not found"}, 404)
+
+            # Resolve the absolute path on disk.
+            if repo_source.is_remote:
+                repo_root = Path(config.data_dir) / "clones" / source_name
+            else:
+                repo_root = Path(repo_source.path)
+
+            absolute_path = repo_root / file_path
+
+            # Security: ensure the resolved path is within the repo root.
+            try:
+                absolute_path.resolve().relative_to(repo_root.resolve())
+            except ValueError:
+                return _cors_json({"error": "Invalid path"}, 400)
+
+            if not absolute_path.is_file():
+                return _cors_json({"error": "File not found on disk"}, 404)
+
+            media_type = mimetypes.guess_type(str(absolute_path))[0] or "application/octet-stream"
+            return FileResponse(
+                str(absolute_path),
+                media_type=media_type,
+                filename=absolute_path.name,
+                content_disposition_type="inline",
+            )
+        except Exception:
+            logger.exception("API get_file failed.")
             return _cors_json({"error": "Internal error"}, 500)
 
     @server.custom_route("/api/search", methods=["GET"])

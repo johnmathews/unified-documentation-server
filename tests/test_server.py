@@ -252,6 +252,99 @@ class TestRescanEndpoint:
             assert second.json()["status"] == "already_running"
 
 
+class TestFilesEndpoint:
+    def test_serves_raw_file(self, tmp_path: Path) -> None:
+        """GET /api/files/{doc_id} should serve the raw file with correct MIME type."""
+        # Create a source directory with a PDF
+        source_dir = tmp_path / "my-docs"
+        source_dir.mkdir()
+        pdf_file = source_dir / "report.pdf"
+        pdf_content = b"%PDF-1.4 fake pdf content for testing"
+        pdf_file.write_bytes(pdf_content)
+
+        config = Config(
+            sources=[RepoSource(name="my-docs", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+            poll_interval_seconds=9999,
+        )
+        mcp = server_module.init_app(config)
+        kb = server_module._get_kb()
+
+        # Seed the doc in the KB (as ingestion would)
+        kb.upsert_document(
+            "my-docs:report.pdf",
+            "",
+            {
+                "source": "my-docs",
+                "file_path": "report.pdf",
+                "title": "report",
+                "is_chunk": False,
+                "total_chunks": 0,
+            },
+        )
+
+        try:
+            starlette_app = mcp.streamable_http_app()
+            client = TestClient(starlette_app)
+            response = client.get("/api/files/my-docs:report.pdf")
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "application/pdf"
+            assert response.content == pdf_content
+        finally:
+            kb.close()
+
+    def test_not_found_doc(self, tmp_path: Path) -> None:
+        """GET /api/files/{doc_id} should return 404 for unknown doc_id."""
+        config = Config(
+            sources=[],
+            data_dir=str(tmp_path / "data"),
+            poll_interval_seconds=9999,
+        )
+        mcp = server_module.init_app(config)
+        kb = server_module._get_kb()
+
+        try:
+            starlette_app = mcp.streamable_http_app()
+            client = TestClient(starlette_app)
+            response = client.get("/api/files/nope:nope.pdf")
+            assert response.status_code == 404
+        finally:
+            kb.close()
+
+    def test_path_traversal_blocked(self, tmp_path: Path) -> None:
+        """GET /api/files/ should block path traversal attempts."""
+        source_dir = tmp_path / "docs"
+        source_dir.mkdir()
+
+        config = Config(
+            sources=[RepoSource(name="docs", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+            poll_interval_seconds=9999,
+        )
+        mcp = server_module.init_app(config)
+        kb = server_module._get_kb()
+
+        # Seed a doc with a traversal path
+        kb.upsert_document(
+            "docs:../../etc/passwd",
+            "",
+            {
+                "source": "docs",
+                "file_path": "../../etc/passwd",
+                "title": "evil",
+                "is_chunk": False,
+            },
+        )
+
+        try:
+            starlette_app = mcp.streamable_http_app()
+            client = TestClient(starlette_app)
+            response = client.get("/api/files/docs:../../etc/passwd")
+            assert response.status_code in (400, 404)
+        finally:
+            kb.close()
+
+
 class TestInputValidation:
     def test_search_clamps_num_results_low(self, app) -> None:
         """num_results=0 should be clamped to 1 (no error)."""

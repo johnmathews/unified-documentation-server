@@ -192,6 +192,47 @@ class TestDocumentParser:
         with pytest.raises(ValueError, match="exceeds"):
             parser.parse_markdown(big_file, "src", tmp_path)
 
+    def test_parse_binary_pdf(self, tmp_path: Path) -> None:
+        """parse_binary should return metadata with empty content for a PDF."""
+        pdf_file = tmp_path / "report.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake pdf content")
+
+        parser = DocumentParser()
+        doc = parser.parse_binary(pdf_file, "test-source", tmp_path)
+
+        assert doc["doc_id"] == "test-source:report.pdf"
+        assert doc["content"] == ""
+        assert doc["metadata"]["title"] == "report"
+        assert doc["metadata"]["source"] == "test-source"
+        assert doc["metadata"]["file_path"] == "report.pdf"
+        assert doc["metadata"]["size_bytes"] > 0
+
+    def test_parse_binary_nested_path(self, tmp_path: Path) -> None:
+        """parse_binary should handle nested file paths correctly."""
+        nested = tmp_path / "docs" / "manuals"
+        nested.mkdir(parents=True)
+        pdf_file = nested / "guide.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+
+        parser = DocumentParser()
+        doc = parser.parse_binary(pdf_file, "src", tmp_path)
+
+        assert doc["doc_id"] == "src:docs/manuals/guide.pdf"
+        assert doc["metadata"]["file_path"] == "docs/manuals/guide.pdf"
+
+    def test_parse_binary_size_guard(self, tmp_path: Path) -> None:
+        """Binary files exceeding MAX_FILE_SIZE should raise ValueError."""
+        big_pdf = tmp_path / "huge.pdf"
+        big_pdf.write_bytes(b"x" * (MAX_FILE_SIZE + 1))
+
+        parser = DocumentParser()
+        with pytest.raises(ValueError, match="exceeds"):
+            parser.parse_binary(big_pdf, "src", tmp_path)
+
+    def test_binary_extensions(self) -> None:
+        """BINARY_EXTENSIONS should include .pdf."""
+        assert ".pdf" in DocumentParser.BINARY_EXTENSIONS
+
 
 class TestRepoManager:
     def test_get_repo_path_local(self, tmp_path: Path) -> None:
@@ -518,6 +559,51 @@ class TestIngester:
         ids = kb.get_all_doc_ids_for_source("repo-a")
         assert "repo-a:readme.md" in ids
         assert "repo-a:guide.md" in ids
+
+    def test_run_once_with_pdf_files(self, tmp_path: Path, kb) -> None:
+        """run_once should index PDFs as metadata-only (no chunks)."""
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "repo-pdf",
+            {"readme.md": "# Hello\n\nWorld."},
+        )
+        # Add a PDF file (binary, not created by _make_source_dir which uses write_text)
+        pdf_file = source_dir / "manual.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake pdf content")
+
+        config = Config(
+            sources=[
+                RepoSource(
+                    name="repo-pdf",
+                    path=str(source_dir),
+                    glob_patterns=["**/*.md", "**/*.pdf"],
+                )
+            ],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats = ingester.run_once()
+
+        assert "repo-pdf" in stats
+        assert stats["repo-pdf"]["errors"] == 0
+
+        # Verify the PDF parent doc exists in KB
+        ids = kb.get_all_doc_ids_for_source("repo-pdf")
+        assert "repo-pdf:manual.pdf" in ids
+
+        # Verify the PDF has no chunks
+        chunk_ids = [i for i in ids if "manual.pdf#chunk" in i]
+        assert len(chunk_ids) == 0
+
+        # Verify the markdown file still has chunks
+        md_chunk_ids = [i for i in ids if "readme.md#chunk" in i]
+        assert len(md_chunk_ids) >= 1
+
+        # Verify the PDF doc has empty content
+        pdf_doc = kb.get_document("repo-pdf:manual.pdf")
+        assert pdf_doc is not None
+        assert pdf_doc["content"] == ""
+        assert pdf_doc["title"] == "manual"
 
     def test_run_once_source_filter(self, tmp_path: Path, kb) -> None:
         """run_once(sources=["source-a"]) should only process source-a."""

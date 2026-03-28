@@ -27,11 +27,9 @@ The ingestion layer manages git repositories and converts markdown files into se
 
 - **RepoManager**: Handles git operations for a single source. Remote repos are cloned into `/data/clones/<source_name>/` on first run, then pulled on subsequent cycles. Local repos (mounted as Docker volumes) are pulled if they have a git remote, or treated as static directories otherwise.
 
-- **DocumentParser**: Reads a markdown file and extracts:
-  - Title (first `#` heading, or filename as fallback)
-  - Creation date (from `git log --follow --diff-filter=A`)
-  - Modification time (filesystem mtime)
-  - File size
+- **DocumentParser**: Reads files and extracts metadata. Supports two parsing modes:
+  - **Markdown** (`parse_markdown`): Reads text content, extracts title from first `#` heading (or filename as fallback), creation date (from `git log --follow --diff-filter=A`), modification time (filesystem mtime), and file size. Content is stored for chunking and search.
+  - **Binary** (`parse_binary`): For non-text files like PDFs (extensions in `BINARY_EXTENSIONS`). Stores metadata only (title from filename stem, dates, size) with empty content. Binary files are not chunked or embedded — they appear in the sidebar tree but are served raw via the `/api/files/` endpoint rather than rendered as text.
 
 - **Chunking** (section-aware): Documents are split into ~400-character chunks using a multi-step strategy:
   1. Parse markdown headings into a section tree
@@ -47,7 +45,7 @@ The ingestion layer manages git repositories and converts markdown files into se
 - **Ingester**: Orchestrates the full cycle via APScheduler. On each tick:
   1. Clean up orphaned sources — detects renames via URL matching before deleting (see below)
   2. Sync all repos in parallel using a thread pool (clone on first run, then fetch + hard reset to match remote)
-  3. Enumerate files matching glob patterns (default: `**/*.md` — all markdown files in the entire repo). Root-level `README.md` files are always included even when custom patterns are specified.
+  3. Enumerate files matching glob patterns (default: `**/*.md`). Add `**/*.pdf` to include PDFs. Root-level `README.md` files are always included even when custom patterns are specified.
   4. Bulk-fetch git creation dates for all files in a single `git log` call (with per-file fallback for renamed files)
   5. Compare SHA-256 content hash against stored hash — skip unchanged files
   6. Parse and chunk changed files
@@ -79,9 +77,11 @@ Each file produces two types of records:
 | Type | Doc ID Format | Purpose |
 |------|--------------|---------|
 | Parent doc | `source:relative/path.md` | Metadata-only record for structured queries |
-| Chunk | `source:relative/path.md#chunk0` | Text content for semantic search |
+| Chunk      | `source:relative/path.md#chunk0` | Text content for semantic search            |
 
 Parent docs have `is_chunk = False` and are stored in SQLite only. Chunks have `is_chunk = True` and are stored in both SQLite and ChromaDB.
+
+Binary files (e.g. PDFs) are stored as parent docs with empty content and zero chunks. They appear in the document tree but have no vector embeddings and are not searchable. The raw file is served via the `/api/files/` endpoint.
 
 ## Knowledge Base
 
@@ -145,6 +145,7 @@ Built with FastMCP, exposes five tools over streamable HTTP:
 - `/rescan` (POST) — Trigger an immediate ingestion cycle. Optional `?source=name` query param to rescan a single source. Returns stats with duration.
 - `/api/tree` (GET) — Document tree organized by source and category. Each source has `root_docs` (root-level files like README.md), `docs` (files in subdirectories), and `journal` (files under journal/).
 - `/api/documents/:doc_id` (GET) — Full document content reassembled from chunks.
+- `/api/files/:doc_id` (GET) — Raw file served from disk with correct MIME type and `Content-Disposition: inline`. Used by the UI to embed PDFs in an iframe. Includes path traversal protection.
 - `/api/search?q=&source=&limit=` (GET) — Semantic search via ChromaDB.
 - `/api/chat` (POST) — RAG-powered chat (searches docs, sends context to Claude).
 

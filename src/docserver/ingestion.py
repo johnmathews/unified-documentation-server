@@ -485,6 +485,50 @@ class RepoManager:
 class DocumentParser:
     """Parses individual markdown files into document dicts ready for the KB."""
 
+    # File extensions that are stored as raw binary (no text extraction or chunking).
+    BINARY_EXTENSIONS = frozenset({".pdf"})
+
+    def parse_binary(
+        self,
+        file_path: Path,
+        source_name: str,
+        repo_root: Path,
+        created_at: str | None = None,
+    ) -> ParsedDocument:
+        """Parse a binary file (e.g. PDF) — metadata only, no text content.
+
+        The file is indexed with empty content so it appears in the sidebar
+        tree but is not searchable via vector search. The raw file is served
+        separately by the ``/api/files/`` endpoint.
+        """
+        relative = file_path.relative_to(repo_root)
+        doc_id = f"{source_name}:{relative}"
+
+        stat = file_path.stat()
+        file_size = stat.st_size
+        if file_size > MAX_FILE_SIZE:
+            raise ValueError(
+                f"File {file_path} is {file_size} bytes, exceeds {MAX_FILE_SIZE} byte limit"
+            )
+
+        title = file_path.stem
+        if created_at is None:
+            created_at = self._git_created_at(file_path, repo_root)
+        modified_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+
+        return {
+            "doc_id": doc_id,
+            "content": "",
+            "metadata": {
+                "source": source_name,
+                "file_path": str(relative),
+                "title": title,
+                "created_at": created_at,
+                "modified_at": modified_at,
+                "size_bytes": file_size,
+            },
+        }
+
     def parse_markdown(
         self,
         file_path: Path,
@@ -1183,11 +1227,19 @@ class Ingester:
                 upsert_batch = []
 
             for file_idx, file_path in enumerate(files, 1):
+                is_binary = file_path.suffix.lower() in DocumentParser.BINARY_EXTENSIONS
+
                 try:
-                    doc = self._parser.parse_markdown(
-                        file_path, source.name, repo_root,
-                        created_at=git_dates.get(file_path),
-                    )
+                    if is_binary:
+                        doc = self._parser.parse_binary(
+                            file_path, source.name, repo_root,
+                            created_at=git_dates.get(file_path),
+                        )
+                    else:
+                        doc = self._parser.parse_markdown(
+                            file_path, source.name, repo_root,
+                            created_at=git_dates.get(file_path),
+                        )
                 except Exception:
                     logger.exception(
                         "Failed to parse '%s' in source '%s'; skipping file.",
@@ -1203,7 +1255,11 @@ class Ingester:
                 base_metadata: DocumentMetadata = doc["metadata"]
 
                 # Compute content hash for change detection.
-                content_hash = hashlib.sha256(content.encode()).hexdigest()
+                # For binary files, hash the raw bytes; for text, hash the content string.
+                if is_binary:
+                    content_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                else:
+                    content_hash = hashlib.sha256(content.encode()).hexdigest()
 
                 # Skip files whose content hasn't changed since last indexing.
                 prev_hash = indexed_hashes.get(base_doc_id)
@@ -1220,8 +1276,13 @@ class Ingester:
                 is_new = base_doc_id not in indexed_hashes
                 change_type = "new" if is_new else "modified"
 
-                chunks = _chunk_content(content)
-                total_chunks = len(chunks)
+                # Binary files are stored as metadata only — no chunking.
+                if is_binary:
+                    chunks = []
+                    total_chunks = 0
+                else:
+                    chunks = _chunk_content(content)
+                    total_chunks = len(chunks)
                 processed += 1
 
                 logger.info(

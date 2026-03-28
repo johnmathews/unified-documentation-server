@@ -45,6 +45,21 @@ CHAT_SYSTEM_INSTRUCTIONS = (
 )
 
 
+def _format_doc(d: dict[str, Any]) -> str:
+    """Format a single document as a compact metadata line."""
+    title = d.get("title") or d.get("file_path", "?")
+    parts = [title]
+    if d.get("file_path") and d.get("title"):
+        parts.append(f"path={d['file_path']}")
+    if d.get("created_at"):
+        parts.append(f"created={d['created_at']}")
+    if d.get("modified_at"):
+        parts.append(f"modified={d['modified_at']}")
+    if d.get("size_bytes"):
+        parts.append(f"size={d['size_bytes']}b")
+    return " | ".join(parts)
+
+
 def build_inventory_context(
     doc_tree: list[dict[str, Any]],
     source_stats: dict[str, dict[str, Any]],
@@ -70,22 +85,21 @@ def build_inventory_context(
         total_files += file_count
         total_chunks += chunk_count
 
-        root_docs = [d.get("title") or d.get("file_path", "?") for d in src.get("root_docs", [])]
-        doc_titles = [d.get("title") or d.get("file_path", "?") for d in src["docs"]]
-        journal_titles = [d.get("title") or d.get("file_path", "?") for d in src["journal"]]
-        eng_titles = [d.get("title") or d.get("file_path", "?") for d in src.get("engineering_team", [])]
-
         inventory_lines.append(
             f"**{src_name}** ({file_count} files, {chunk_count} chunks, last indexed: {last_indexed}):"
         )
-        if root_docs:
-            inventory_lines.append(f"  Root docs ({len(root_docs)}): {', '.join(root_docs)}")
-        if doc_titles:
-            inventory_lines.append(f"  Documentation ({len(doc_titles)}): {', '.join(doc_titles)}")
-        if journal_titles:
-            inventory_lines.append(f"  Journal ({len(journal_titles)}): {', '.join(journal_titles)}")
-        if eng_titles:
-            inventory_lines.append(f"  Engineering team ({len(eng_titles)}): {', '.join(eng_titles)}")
+
+        for category, key in [
+            ("Root docs", "root_docs"),
+            ("Documentation", "docs"),
+            ("Journal", "journal"),
+            ("Engineering team", "engineering_team"),
+        ]:
+            docs = src.get(key, [])
+            if docs:
+                inventory_lines.append(f"  {category} ({len(docs)}):")
+                for d in docs:
+                    inventory_lines.append(f"    - {_format_doc(d)}")
 
     header = (
         f"Documentation inventory: {len(doc_tree)} sources, "

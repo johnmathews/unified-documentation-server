@@ -33,21 +33,39 @@ def _make_tree(
             "source": src,
             "root_docs": [],
             "docs": [
-                {"title": "Setup Guide", "file_path": "docs/setup.md"},
-                {"title": "Architecture", "file_path": "docs/architecture.md"},
+                {
+                    "title": "Setup Guide",
+                    "file_path": "docs/setup.md",
+                    "created_at": "2025-06-15T10:00:00+00:00",
+                    "modified_at": "2026-03-01T12:00:00+00:00",
+                    "size_bytes": 4200,
+                },
+                {
+                    "title": "Architecture",
+                    "file_path": "docs/architecture.md",
+                    "created_at": "2025-08-20T14:30:00+00:00",
+                    "modified_at": "2026-03-15T09:00:00+00:00",
+                    "size_bytes": 8500,
+                },
             ],
             "journal": [
-                {"title": "Initial commit", "file_path": "journal/260101-init.md"},
+                {
+                    "title": "Initial commit",
+                    "file_path": "journal/260101-init.md",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "modified_at": "2026-01-01T00:00:00+00:00",
+                    "size_bytes": 1200,
+                },
             ],
         }
         if with_root_docs:
             entry["root_docs"] = [
-                {"title": None, "file_path": "README.md"},
-                {"title": None, "file_path": "CLAUDE.md"},
+                {"title": None, "file_path": "README.md", "created_at": "2025-01-01T00:00:00+00:00", "modified_at": "2026-03-28T10:00:00+00:00", "size_bytes": 3000},
+                {"title": None, "file_path": "CLAUDE.md", "created_at": "2025-11-01T00:00:00+00:00", "modified_at": "2026-03-20T10:00:00+00:00", "size_bytes": 1500},
             ]
         if with_engineering:
             entry["engineering_team"] = [
-                {"title": "Eval Report", "file_path": ".engineering-team/evaluation-report.md"},
+                {"title": "Eval Report", "file_path": ".engineering-team/evaluation-report.md", "created_at": "2026-03-25T00:00:00+00:00", "modified_at": "2026-03-25T22:00:00+00:00", "size_bytes": 13000},
             ]
         tree.append(entry)
     return tree
@@ -171,6 +189,46 @@ class TestBuildInventoryContext:
         result = build_inventory_context(tree, stats)
         assert "Engineering team (1)" in result
         assert "Eval Report" in result
+
+    def test_includes_created_at_dates(self):
+        tree = _make_tree()
+        stats = _make_stats()
+        result = build_inventory_context(tree, stats)
+        assert "created=2025-06-15T10:00:00+00:00" in result  # Setup Guide
+        assert "created=2026-01-01T00:00:00+00:00" in result  # Initial commit
+
+    def test_includes_modified_at_dates(self):
+        tree = _make_tree()
+        stats = _make_stats()
+        result = build_inventory_context(tree, stats)
+        assert "modified=2026-03-01T12:00:00+00:00" in result  # Setup Guide
+
+    def test_includes_size_bytes(self):
+        tree = _make_tree()
+        stats = _make_stats()
+        result = build_inventory_context(tree, stats)
+        assert "size=4200b" in result  # Setup Guide
+        assert "size=8500b" in result  # Architecture
+
+    def test_includes_file_path_when_title_present(self):
+        tree = _make_tree()
+        stats = _make_stats()
+        result = build_inventory_context(tree, stats)
+        assert "path=docs/setup.md" in result
+        assert "path=docs/architecture.md" in result
+
+    def test_doc_without_dates_omits_date_fields(self):
+        tree = [{
+            "source": "test",
+            "root_docs": [],
+            "docs": [{"title": "No Dates", "file_path": "docs/nodates.md"}],
+            "journal": [],
+        }]
+        stats = _make_stats(sources=["test"])
+        result = build_inventory_context(tree, stats)
+        assert "No Dates" in result
+        assert "created=" not in result
+        assert "modified=" not in result
 
     def test_omits_empty_root_docs(self):
         tree = _make_tree(with_root_docs=False)

@@ -1,9 +1,11 @@
 """Tests for the ingestion module."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from git import Repo as GitRepo
 
 from docserver.config import Config, RepoSource
 from docserver.ingestion import (
@@ -16,6 +18,47 @@ from docserver.ingestion import (
     _parse_sections,
 )
 from docserver.knowledge_base import KnowledgeBase
+
+
+def _init_bare_repo(path: Path, branch: str = "main") -> GitRepo:
+    """Create a bare git repo with an initial commit on the given branch."""
+    bare = GitRepo.init(str(path), bare=True)
+    # Create a temporary working copy to make the initial commit
+    work_dir = path.parent / f"{path.name}-work"
+    work = GitRepo.init(str(work_dir))
+    # Configure git user for commits
+    work.config_writer().set_value("user", "name", "Test").release()
+    work.config_writer().set_value("user", "email", "test@test.com").release()
+    # Ensure we're on the right branch name
+    subprocess.run(
+        ["git", "checkout", "-B", branch],
+        cwd=str(work_dir), capture_output=True, check=True,
+    )
+    # Create initial commit
+    (work_dir / "README.md").write_text("# Init\n")
+    work.index.add(["README.md"])
+    work.index.commit("Initial commit")
+    # Add bare repo as remote and push
+    work.create_remote("origin", str(path))
+    work.remote("origin").push(refspec=f"{branch}:{branch}")
+    work.close()
+    return bare
+
+
+def _push_to_bare(bare_path: Path, files: dict[str, str], message: str, branch: str = "main") -> None:
+    """Clone the bare repo, add/modify files, commit, and push."""
+    work_dir = bare_path.parent / f"{bare_path.name}-push-{hash(message) % 10000}"
+    work = GitRepo.clone_from(str(bare_path), str(work_dir), branch=branch)
+    work.config_writer().set_value("user", "name", "Test").release()
+    work.config_writer().set_value("user", "email", "test@test.com").release()
+    for name, content in files.items():
+        fpath = work_dir / name
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fpath.write_text(content)
+    work.index.add(list(files.keys()))
+    work.index.commit(message)
+    work.remote("origin").push()
+    work.close()
 
 
 class TestSectionParsing:
@@ -384,6 +427,7 @@ class TestRepoManager:
 
         mock_repo = MagicMock()
         mock_repo.head.commit.hexsha = "aaa"
+        mock_repo.remotes.origin.url = "https://example.com/repo.git"
         mock_repo_cls.return_value = mock_repo
 
         # After reset, simulate a new commit
@@ -418,6 +462,7 @@ class TestRepoManager:
         mock_repo = MagicMock()
         # Same commit before and after
         mock_repo.head.commit.hexsha = "aaa"
+        mock_repo.remotes.origin.url = "https://example.com/repo.git"
         mock_repo_cls.return_value = mock_repo
 
         result = manager.sync()
@@ -441,6 +486,7 @@ class TestRepoManager:
 
         mock_repo = MagicMock()
         mock_repo.head.commit.hexsha = "aaa"
+        mock_repo.remotes.origin.url = "https://example.com/repo.git"
         mock_repo.remotes.origin.fetch.side_effect = RuntimeError("network error")
         mock_repo_cls.return_value = mock_repo
 
@@ -468,6 +514,7 @@ class TestRepoManager:
         manager = RepoManager(source, str(clone_dir))
 
         mock_repo = MagicMock()
+        mock_repo.remotes.origin.url = "https://example.com/repo.git"
         type(mock_repo.head).commit = property(
             lambda self: (_ for _ in ()).throw(ValueError("Invalid reference"))
         )
@@ -1272,3 +1319,179 @@ class TestBatchIngestion:
         assert len(results) >= 1
 
         kb.close()
+
+
+class TestRemoteSyncIntegration:
+    """Integration tests using real git repos (no mocks) to verify the full
+    clone → fetch → detect changes → reindex pipeline."""
+
+    @pytest.fixture
+    def kb(self, tmp_path: Path):
+        _kb = KnowledgeBase(str(tmp_path / "data"))
+        yield _kb
+        _kb.close()
+
+    def test_initial_clone_indexes_files(self, tmp_path: Path, kb) -> None:
+        """First run_once should clone the remote repo and index all files."""
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+        _push_to_bare(bare_path, {
+            "docs/guide.md": "# Guide\n\nSetup instructions.",
+        }, "Add guide")
+
+        config = Config(
+            sources=[RepoSource(name="test-remote", path=str(bare_path), is_remote=True, branch="main")],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        stats = ingester.run_once()
+
+        assert stats["test-remote"]["errors"] == 0
+        assert stats["test-remote"]["new"] >= 1
+        assert kb.get_document("test-remote:README.md") is not None
+        assert kb.get_document("test-remote:docs/guide.md") is not None
+
+    def test_sync_detects_new_commits(self, tmp_path: Path, kb) -> None:
+        """After initial index, pushing a new commit should be detected on next run_once."""
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+
+        config = Config(
+            sources=[RepoSource(name="test-remote", path=str(bare_path), is_remote=True, branch="main")],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+
+        # First run: clone and index
+        stats1 = ingester.run_once()
+        assert stats1["test-remote"]["new"] >= 1
+
+        # Push a new file to the remote
+        _push_to_bare(bare_path, {
+            "docs/new-feature.md": "# New Feature\n\nThis is brand new content.",
+        }, "Add new feature doc")
+
+        # Second run: should detect the new commit and index the new file
+        stats2 = ingester.run_once()
+        assert stats2["test-remote"]["new"] >= 1, (
+            f"Expected new files to be detected after push, got: {stats2['test-remote']}"
+        )
+        assert kb.get_document("test-remote:docs/new-feature.md") is not None
+
+    def test_sync_detects_modified_files(self, tmp_path: Path, kb) -> None:
+        """Modifying an existing file in the remote should be detected."""
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+
+        config = Config(
+            sources=[RepoSource(name="test-remote", path=str(bare_path), is_remote=True, branch="main")],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+
+        # First run: clone and index
+        ingester.run_once()
+        doc_before = kb.get_document("test-remote:README.md")
+        assert doc_before is not None
+        assert doc_before["content"] == "# Init\n"
+
+        # Push a modification to the same file
+        _push_to_bare(bare_path, {
+            "README.md": "# Updated README\n\nThis content has been changed.",
+        }, "Update README")
+
+        # Second run: should detect the modification
+        stats2 = ingester.run_once()
+        assert stats2["test-remote"]["modified"] >= 1, (
+            f"Expected modified files after push, got: {stats2['test-remote']}"
+        )
+        doc_after = kb.get_document("test-remote:README.md")
+        assert "Updated README" in doc_after["content"]
+
+    def test_sync_detects_deleted_files(self, tmp_path: Path, kb) -> None:
+        """Deleting a file from the remote should remove it from the KB."""
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+        _push_to_bare(bare_path, {
+            "docs/to-delete.md": "# Delete Me\n\nThis file will be removed.",
+        }, "Add file to delete later")
+
+        config = Config(
+            sources=[RepoSource(name="test-remote", path=str(bare_path), is_remote=True, branch="main")],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+
+        # First run: index everything
+        ingester.run_once()
+        assert kb.get_document("test-remote:docs/to-delete.md") is not None
+
+        # Delete the file in the remote by pushing without it
+        clone_dir = bare_path.parent / "delete-workdir"
+        work = GitRepo.clone_from(str(bare_path), str(clone_dir), branch="main")
+        work.config_writer().set_value("user", "name", "Test").release()
+        work.config_writer().set_value("user", "email", "test@test.com").release()
+        (clone_dir / "docs" / "to-delete.md").unlink()
+        work.index.remove(["docs/to-delete.md"])
+        work.index.commit("Delete file")
+        work.remote("origin").push()
+        work.close()
+
+        # Second run: should detect the deletion
+        stats2 = ingester.run_once()
+        assert stats2["test-remote"]["deleted"] >= 1, (
+            f"Expected deletions after removing file, got: {stats2['test-remote']}"
+        )
+        assert kb.get_document("test-remote:docs/to-delete.md") is None
+
+    def test_no_changes_returns_all_skipped(self, tmp_path: Path, kb) -> None:
+        """Running twice with no changes should skip all files on second run."""
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+
+        config = Config(
+            sources=[RepoSource(name="test-remote", path=str(bare_path), is_remote=True, branch="main")],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+
+        stats1 = ingester.run_once()
+        assert stats1["test-remote"]["new"] >= 1
+
+        stats2 = ingester.run_once()
+        assert stats2["test-remote"]["new"] == 0
+        assert stats2["test-remote"]["modified"] == 0
+        assert stats2["test-remote"]["skipped"] >= 1
+
+    def test_origin_url_updated_when_config_changes(self, tmp_path: Path, kb) -> None:
+        """If the source URL changes in config (e.g. token rotation), the clone's
+        origin URL should be updated before fetching."""
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+
+        # Create a second bare repo (simulates URL change to a different location)
+        bare_path2 = tmp_path / "remote2.git"
+        _init_bare_repo(bare_path2)
+        _push_to_bare(bare_path2, {
+            "docs/from-new-url.md": "# From new URL\n\nThis came from the updated remote.",
+        }, "Add file on new remote")
+
+        # Initial ingestion from first URL
+        config1 = Config(
+            sources=[RepoSource(name="test-remote", path=str(bare_path), is_remote=True, branch="main")],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester1 = Ingester(config1, kb)
+        ingester1.run_once()
+        assert kb.get_document("test-remote:docs/from-new-url.md") is None
+
+        # Re-create ingester with updated URL pointing to second repo
+        config2 = Config(
+            sources=[RepoSource(name="test-remote", path=str(bare_path2), is_remote=True, branch="main")],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester2 = Ingester(config2, kb)
+        stats2 = ingester2.run_once()
+
+        # The origin URL should have been updated, fetching from the new remote
+        assert kb.get_document("test-remote:docs/from-new-url.md") is not None

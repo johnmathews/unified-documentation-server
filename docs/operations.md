@@ -90,6 +90,9 @@ Key log events (filter with `grep '"event":'`):
 | `model_download_start/done` | -- | Embedding model being downloaded |
 | `ingestion_start` | `sources` | Ingestion cycle beginning |
 | `sync_start` / `sync_done` | `source`, `changed` | Git sync per source |
+| `sync_unchanged` | `source`, `head` | Sync found no new commits (logs HEAD sha for diagnosis) |
+| `fetch_info` | `source` | Per-ref fetch results with flags (HEAD_UPTODATE, FAST_FORWARD, etc.) |
+| `origin_url_update` | `source` | Clone's origin URL was updated to match current config (e.g., after token rotation) |
 | `clone_start` / `clone_done` | `source` | First-time clone of remote repo |
 | `clone_error` | `source`, `branch`, `path` | Clone failed (URL, auth, branch, network, or disk issue) |
 | `repo_path_missing` | `source`, `path` | Repo directory does not exist (mount missing or clone failed) |
@@ -155,6 +158,27 @@ Common causes:
 - **Wrong glob patterns:** The default pattern `**/*.md` searches the repo root recursively. If docs are in a subdirectory, use `docs/**/*.md` instead.
 - **Mount not working:** For local sources, the directory may not be mounted into the container. The log checks whether the parent directory exists to help distinguish "wrong path" from "mount missing entirely".
 - **Empty repo:** The repo was cloned but contains no markdown files.
+
+### Changes not being picked up from remote repos
+
+If you push changes to a source repo but the docserver logs keep showing `"All N file(s) unchanged"`, check these things in order:
+
+1. **Check the `fetch_info` log.** After each sync, the server now logs per-ref fetch results. Look for:
+   - `HEAD_UPTODATE` -- the remote truly has no new commits (your push may not have landed yet, or you pushed to a different branch than the one configured in `sources.yaml`)
+   - `FAST_FORWARD` -- new commits were fetched and the clone was updated. If you see this but files are still "unchanged", the content hash comparison is working correctly and the file content hasn't changed.
+   - No `fetch_info` log at all -- the fetch returned no info, which can indicate a connectivity or authentication issue that didn't raise an exception.
+
+2. **Check the HEAD sha.** The `sync_unchanged` event now logs `HEAD=<sha>`. Compare this against the latest commit on your remote branch. If they don't match, the fetch isn't picking up your changes.
+
+3. **Check the `origin_url_update` event.** If you rotated a token or changed a source URL in `sources.yaml`, the server now automatically updates the clone's origin URL. Look for this log to confirm the URL was updated. Without this fix, clones on the Docker volume would keep using the stale URL from the original clone.
+
+4. **Check the branch name.** Ensure the `branch` field in `sources.yaml` matches the branch you're pushing to. The default is `main`. If your repo uses `master` or another default branch, you need to specify it explicitly.
+
+5. **Force a fresh clone.** If the clone on the Docker volume is in a bad state, delete it and let the next cycle re-clone:
+   ```bash
+   docker exec documentation-mcp-server rm -rf "/data/clones/<source-name>"
+   ```
+   The next ingestion cycle (within 5 minutes) will re-clone and re-index.
 
 ### Search returns no results
 

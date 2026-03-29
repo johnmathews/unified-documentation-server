@@ -296,6 +296,23 @@ class RepoManager:
             branch = self.source.branch or "main"
             origin = repo.remotes.origin
 
+            # Ensure the clone's origin URL matches the current config.
+            # The URL can drift if the user rotates tokens or changes the
+            # source path in sources.yaml while the clone persists on a
+            # Docker volume.
+            current_url = origin.url
+            if current_url != self.source.path:
+                display_old = re.sub(r"://[^@]+@", "://<redacted>@", current_url)
+                display_new = re.sub(r"://[^@]+@", "://<redacted>@", self.source.path)
+                logger.info(
+                    "Updating origin URL for '%s': %s -> %s",
+                    self.source.name,
+                    display_old,
+                    display_new,
+                    extra={"event": "origin_url_update", "source": self.source.name},
+                )
+                origin.set_url(self.source.path)
+
             # Read current HEAD for change detection. This can fail if the repo
             # is in a corrupt state (e.g. invalid branch refs). In that case,
             # delete the clone and re-clone fresh — corrupt refs persist through
@@ -323,7 +340,27 @@ class RepoManager:
                 )
                 return True
 
-            origin.fetch()
+            fetch_info = origin.fetch()
+            fetch_summary = []
+            for fi in fetch_info:
+                flag_names = []
+                if fi.flags & fi.NEW_HEAD:
+                    flag_names.append("NEW_HEAD")
+                if fi.flags & fi.FAST_FORWARD:
+                    flag_names.append("FAST_FORWARD")
+                if fi.flags & fi.NEW_TAG:
+                    flag_names.append("NEW_TAG")
+                if fi.flags & fi.HEAD_UPTODATE:
+                    flag_names.append("HEAD_UPTODATE")
+                fetch_summary.append(f"{fi.ref}[{','.join(flag_names) or 'flags=' + str(fi.flags)}]")
+            if fetch_summary:
+                logger.info(
+                    "Fetch results for '%s': %s",
+                    self.source.name,
+                    "; ".join(fetch_summary),
+                    extra={"event": "fetch_info", "source": self.source.name},
+                )
+
             repo.head.reset(f"origin/{branch}", index=True, working_tree=True)
             new_head = repo.head.commit.hexsha
             changed = old_head != new_head
@@ -336,7 +373,12 @@ class RepoManager:
                     new_head[:8],
                 )
             else:
-                logger.debug("No changes for remote repo '%s'.", self.source.name)
+                logger.info(
+                    "No new commits for remote repo '%s' (HEAD=%s).",
+                    self.source.name,
+                    old_head[:8],
+                    extra={"event": "sync_unchanged", "source": self.source.name, "head": old_head[:8]},
+                )
             return changed
         except Exception:
             display_url = re.sub(r"://[^@]+@", "://<redacted>@", self.source.path)

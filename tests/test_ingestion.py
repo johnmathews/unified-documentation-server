@@ -895,7 +895,7 @@ class TestIngester:
 
     def test_last_check_times_populated_after_run_once(self, tmp_path: Path, kb) -> None:
         """run_once should record a last_checked timestamp for each successfully synced source."""
-        from datetime import datetime, UTC
+        from datetime import UTC, datetime
 
         source_dir = self._make_source_dir(
             tmp_path,
@@ -1586,7 +1586,7 @@ class TestRemoteSyncIntegration:
             data_dir=str(tmp_path / "data"),
         )
         ingester2 = Ingester(config2, kb)
-        stats2 = ingester2.run_once()
+        ingester2.run_once()
 
         # The origin URL should have been updated, fetching from the new remote
         assert kb.get_document("test-remote:docs/from-new-url.md") is not None

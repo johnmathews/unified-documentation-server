@@ -5,14 +5,12 @@ endpoint, ensuring the agent receives the right context to answer meta
 questions about indexing status, document counts, and source inventory.
 """
 
-import pytest
 
 from docserver.server import (
     CHAT_SYSTEM_INSTRUCTIONS,
     build_inventory_context,
     build_system_prompt,
 )
-
 
 # ---- Fixtures ---------------------------------------------------------------
 

@@ -666,3 +666,104 @@ def test_upsert_documents_batch_replaces_existing(kb):
     doc = kb.get_document("src:readme.md")
     assert doc["title"] == "New"
     assert doc["content"] == "New content"
+
+
+# ---------------------------------------------------------------------------
+# Keyword search on title and file_path
+# ---------------------------------------------------------------------------
+
+
+def test_keyword_search_title_path_matches_title(kb):
+    """_keyword_search_title_path should find docs whose title contains the query."""
+    kb.upsert_document(
+        "src:guide.md",
+        "Some body content about unrelated topics.",
+        {"source": "src", "file_path": "guide.md", "title": "Docker Deployment Guide", "is_chunk": False},
+    )
+
+    results = kb._keyword_search_title_path("Docker")
+    assert len(results) == 1
+    assert results[0]["doc_id"] == "src:guide.md"
+    assert results[0]["title"] == "Docker Deployment Guide"
+
+
+def test_keyword_search_title_path_matches_file_path(kb):
+    """_keyword_search_title_path should find docs whose file_path contains the query."""
+    kb.upsert_document(
+        "src:networking/ports.md",
+        "Body text about other things.",
+        {"source": "src", "file_path": "networking/ports.md", "title": "Port Config", "is_chunk": False},
+    )
+
+    results = kb._keyword_search_title_path("networking")
+    assert len(results) == 1
+    assert results[0]["doc_id"] == "src:networking/ports.md"
+
+
+def test_keyword_search_title_path_excludes_chunks(kb):
+    """_keyword_search_title_path should only return parent documents, not chunks."""
+    kb.upsert_document(
+        "src:guide.md",
+        "",
+        {"source": "src", "file_path": "guide.md", "title": "Docker Guide", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "src:guide.md#chunk0",
+        "Docker content",
+        {
+            "source": "src",
+            "file_path": "guide.md",
+            "title": "Docker Guide",
+            "chunk_index": 0,
+            "is_chunk": True,
+        },
+    )
+
+    results = kb._keyword_search_title_path("Docker")
+    assert len(results) == 1
+    assert "#chunk" not in results[0]["doc_id"]
+
+
+def test_keyword_search_title_path_with_source_filter(kb):
+    """_keyword_search_title_path should respect source_filter."""
+    kb.upsert_document(
+        "alpha:guide.md",
+        "",
+        {"source": "alpha", "file_path": "guide.md", "title": "Docker Guide", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "beta:guide.md",
+        "",
+        {"source": "beta", "file_path": "guide.md", "title": "Docker Tutorial", "is_chunk": False},
+    )
+
+    results = kb._keyword_search_title_path("Docker", source_filter="alpha")
+    assert len(results) == 1
+    assert results[0]["source"] == "alpha"
+
+
+def test_search_documents_includes_title_only_matches(kb):
+    """search_documents should find docs where the query appears only in the title."""
+    # Parent doc with a distinctive title but unrelated body
+    kb.upsert_document(
+        "src:xyzzy.md",
+        "This document has completely unrelated content about gardening and flowers.",
+        {"source": "src", "file_path": "xyzzy.md", "title": "Kubernetes Cluster Setup", "is_chunk": False},
+    )
+    # Chunk with unrelated content (so semantic search won't match "Kubernetes")
+    kb.upsert_document(
+        "src:xyzzy.md#chunk0",
+        "This document has completely unrelated content about gardening and flowers.",
+        {
+            "source": "src",
+            "file_path": "xyzzy.md",
+            "title": "Kubernetes Cluster Setup",
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "is_chunk": True,
+        },
+    )
+
+    results = kb.search_documents("Kubernetes")
+    doc_ids = [r["doc_id"] for r in results]
+    assert "src:xyzzy.md" in doc_ids

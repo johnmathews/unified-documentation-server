@@ -594,6 +594,49 @@ class KnowledgeBase:
             )
         return tree
 
+    def _keyword_search_title_path(
+        self,
+        query: str,
+        source_filter: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Keyword search on title and file_path via SQLite LIKE.
+
+        Returns parent documents whose title or file_path contain the query
+        (case-insensitive). Results are given a synthetic score of 0.5 so they
+        sort after strong semantic matches but before weak ones.
+        """
+        sql = """
+            SELECT doc_id, source, file_path, title, created_at, modified_at,
+                   SUBSTR(content, 1, 200) AS snippet
+            FROM documents
+            WHERE (is_chunk = FALSE OR chunk_index IS NULL)
+              AND (title LIKE :pattern OR file_path LIKE :pattern)
+        """
+        params: dict[str, Any] = {"pattern": f"%{query}%"}
+        if source_filter:
+            sql += " AND source = :source"
+            params["source"] = source_filter
+        sql += " ORDER BY modified_at DESC LIMIT :limit"
+        params["limit"] = limit
+
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        return [
+            {
+                "doc_id": row["doc_id"],
+                "source": row["source"],
+                "file_path": row["file_path"],
+                "title": row["title"],
+                "created_at": row["created_at"],
+                "modified_at": row["modified_at"],
+                "score": 0.5,
+                "snippet": row["snippet"] or "",
+            }
+            for row in rows
+        ]
+
     def search_documents(
         self,
         query: str,
@@ -602,7 +645,8 @@ class KnowledgeBase:
     ) -> list[dict[str, Any]]:
         """Search and return parent document metadata (deduplicated from chunk hits).
 
-        Uses ChromaDB for semantic search on chunks, then maps back to parent docs.
+        Combines ChromaDB semantic search on chunks with keyword search on
+        title and file_path, then deduplicates and limits to n_results.
         """
         search_results = self.search(query, n_results=n_results * 2, source_filter=source_filter)
 
@@ -632,10 +676,19 @@ class KnowledgeBase:
                     }
                 )
 
-            if len(parent_docs) >= n_results:
-                break
+        # Complement with keyword matches on title and file_path
+        keyword_hits = self._keyword_search_title_path(
+            query, source_filter=source_filter, limit=n_results,
+        )
+        for hit in keyword_hits:
+            if hit["doc_id"] not in seen_parents:
+                seen_parents.add(hit["doc_id"])
+                parent_docs.append(hit)
 
-        return parent_docs
+        # Sort by score (lower = more relevant for ChromaDB distances)
+        parent_docs.sort(key=lambda d: d["score"])
+
+        return parent_docs[:n_results]
 
     def get_sources_summary(self) -> list[SourceSummary]:
         """Return per-source summary: source, file_count, chunk_count, last_indexed."""

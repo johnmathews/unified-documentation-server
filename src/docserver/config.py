@@ -145,9 +145,12 @@ def load_config(path: str | None = None) -> Config:
 
     raw_sources = raw.get("sources")
     if isinstance(raw_sources, list):
-        sources = _parse_sources(
-            cast("list[dict[str, object]]", [item for item in raw_sources if isinstance(item, dict)])
-        )
+        dict_items: list[dict[str, object]] = [
+            cast("dict[str, object]", item)
+            for item in cast("list[object]", raw_sources)
+            if isinstance(item, dict)
+        ]
+        sources = _parse_sources(dict_items)
     else:
         sources: list[RepoSource] = []
 

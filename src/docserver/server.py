@@ -13,16 +13,22 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 import anthropic
+from anthropic.types import MessageParam, TextBlock
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import FileResponse, JSONResponse
 
 from docserver.config import Config, load_config
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from starlette.requests import Request
 from docserver.ingestion import Ingester
-from docserver.knowledge_base import KnowledgeBase
+from docserver.knowledge_base import KnowledgeBase, SourceSummary
 from docserver.logging_config import setup_logging
+
+# Scalar type alias matching knowledge_base.Scalar
+Scalar = str | int | float | bool | None
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +56,10 @@ CHAT_SYSTEM_INSTRUCTIONS = (
 )
 
 
-def _format_doc(d: dict[str, Any]) -> str:
+def _format_doc(d: dict[str, Scalar]) -> str:
     """Format a single document as a compact metadata line."""
     title = d.get("title") or d.get("file_path", "?")
-    parts = [title]
+    parts: list[str] = [str(title)]
     if d.get("file_path") and d.get("title"):
         parts.append(f"path={d['file_path']}")
     if d.get("created_at"):
@@ -65,9 +71,13 @@ def _format_doc(d: dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
+# Type alias for the nested tree structure returned by KnowledgeBase.get_document_tree()
+_TreeNode = dict[str, "Scalar | list[dict[str, Scalar]]"]
+
+
 def build_inventory_context(
-    doc_tree: list[dict[str, Any]],
-    source_stats: dict[str, dict[str, Any]],
+    doc_tree: list[_TreeNode],
+    source_stats: Mapping[str, SourceSummary],
 ) -> str:
     """Build the document inventory section of the system prompt.
 
@@ -82,11 +92,11 @@ def build_inventory_context(
     total_files = 0
     total_chunks = 0
     for src in doc_tree:
-        src_name = src["source"]
-        stats = source_stats.get(src_name, {})
-        file_count = stats.get("file_count", 0)
-        chunk_count = stats.get("chunk_count", 0)
-        last_indexed = stats.get("last_indexed", "never")
+        src_name = str(src["source"])
+        stats = source_stats.get(src_name)
+        file_count = stats["file_count"] if stats else 0
+        chunk_count = stats["chunk_count"] if stats else 0
+        last_indexed = stats["last_indexed"] if stats else "never"
         total_files += file_count
         total_chunks += chunk_count
 
@@ -100,7 +110,8 @@ def build_inventory_context(
             ("Journal", "journal"),
             ("Engineering team", "engineering_team"),
         ]:
-            docs = src.get(key, [])
+            raw_docs = src.get(key, [])
+            docs = raw_docs if isinstance(raw_docs, list) else []
             if docs:
                 inventory_lines.append(f"  {category} ({len(docs)}):")
                 for d in docs:
@@ -137,7 +148,7 @@ def _get_ingester() -> Ingester:
     return _ingester
 
 
-def _cors_json(data: Any, status_code: int = 200) -> JSONResponse:
+def _cors_json(data: object, status_code: int = 200) -> JSONResponse:
     """Return a JSONResponse with CORS headers for the UI."""
     return JSONResponse(
         data,
@@ -162,21 +173,29 @@ def create_mcp(config: Config) -> FastMCP:
     # ---- Health endpoint ------------------------------------------------
 
     @server.custom_route("/health", methods=["GET"])
-    async def health(request: Request) -> JSONResponse:
+    async def health(_request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         try:
             kb = _get_kb()
             ingester = _get_ingester()
             summary = kb.get_sources_summary()
             last_check_times = ingester.get_last_check_times()
             # Merge last_checked into each source's summary data.
-            for src in summary:
-                src["last_checked"] = last_check_times.get(src["source"])
+            sources_with_check: list[dict[str, str | int | None]] = [
+                {
+                    "source": src["source"],
+                    "file_count": src["file_count"],
+                    "chunk_count": src["chunk_count"],
+                    "last_indexed": src["last_indexed"],
+                    "last_checked": last_check_times.get(src["source"]),
+                }
+                for src in summary
+            ]
             return JSONResponse(
                 {
                     "status": "ok",
                     "total_sources": len(summary),
                     "total_chunks": sum(s.get("chunk_count", 0) for s in summary),
-                    "sources": summary,
+                    "sources": sources_with_check,
                 }
             )
         except Exception:
@@ -189,7 +208,7 @@ def create_mcp(config: Config) -> FastMCP:
     _rescan_running = False
 
     @server.custom_route("/rescan", methods=["POST"])
-    async def rescan(request: Request) -> JSONResponse:
+    async def rescan(request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         """Trigger a background ingestion cycle. Optionally pass ?source=name&force=true."""
         nonlocal _rescan_running
         try:
@@ -234,7 +253,7 @@ def create_mcp(config: Config) -> FastMCP:
     # ---- REST API for Web UI -------------------------------------------
 
     @server.custom_route("/api/tree", methods=["GET"])
-    async def api_tree(request: Request) -> JSONResponse:
+    async def api_tree(_request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         """Return document tree: sources → categories → documents."""
         try:
             kb = _get_kb()
@@ -245,11 +264,12 @@ def create_mcp(config: Config) -> FastMCP:
             return _cors_json({"error": "Internal error"}, 500)
 
     @server.custom_route("/api/documents/{doc_id:path}", methods=["GET"])
-    async def api_get_document(request: Request) -> JSONResponse:
+    async def api_get_document(request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         """Return a single document by ID (URL-encoded)."""
         try:
             kb = _get_kb()
-            doc_id = unquote(request.path_params["doc_id"])
+            raw_doc_id: str = str(request.path_params["doc_id"])  # pyright: ignore[reportAny]
+            doc_id = unquote(raw_doc_id)
             doc = kb.get_document(doc_id)
             if doc is None:
                 return _cors_json({"error": "Not found"}, 404)
@@ -259,17 +279,17 @@ def create_mcp(config: Config) -> FastMCP:
             return _cors_json({"error": "Internal error"}, 500)
 
     @server.custom_route("/api/files/{doc_id:path}", methods=["GET"])
-    async def api_get_file(request: Request) -> JSONResponse | FileResponse:
+    async def api_get_file(request: Request) -> JSONResponse | FileResponse:  # pyright: ignore[reportUnusedFunction]
         """Serve a raw file from disk by doc_id (e.g. for PDFs)."""
         try:
             kb = _get_kb()
-            doc_id = unquote(request.path_params["doc_id"])
+            doc_id = unquote(str(request.path_params["doc_id"]))
             doc = kb.get_document(doc_id)
             if doc is None:
                 return _cors_json({"error": "Not found"}, 404)
 
-            source_name = doc["source"]
-            file_path = doc["file_path"]
+            source_name = str(doc["source"])
+            file_path = str(doc["file_path"])
 
             # Find the matching source config to resolve the repo root.
             repo_source = None
@@ -309,7 +329,7 @@ def create_mcp(config: Config) -> FastMCP:
             return _cors_json({"error": "Internal error"}, 500)
 
     @server.custom_route("/api/search", methods=["GET"])
-    async def api_search(request: Request) -> JSONResponse:
+    async def api_search(request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         """Search documents. Query params: q (required), source (optional), limit (optional)."""
         try:
             kb = _get_kb()
@@ -325,19 +345,19 @@ def create_mcp(config: Config) -> FastMCP:
             return _cors_json({"error": "Internal error"}, 500)
 
     @server.custom_route("/api/chat", methods=["POST", "OPTIONS"])
-    async def api_chat(request: Request) -> JSONResponse:
+    async def api_chat(request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         """Chat endpoint: RAG search + Claude API. Body: {message, doc_id?, history?}."""
         if request.method == "OPTIONS":
             return _cors_json({})
 
         try:
             kb = _get_kb()
-            body = await request.json()
-            message = body.get("message", "")
+            body: dict[str, Any] = await request.json()  # pyright: ignore[reportExplicitAny]
+            message: str = body.get("message", "")
             if not message:
                 return _cors_json({"error": "Missing 'message'"}, 400)
 
-            current_doc_id = body.get("doc_id")
+            current_doc_id: str | None = body.get("doc_id")
             history: list[dict[str, str]] = body.get("history", [])
 
             # Build context from current page + RAG search
@@ -348,10 +368,10 @@ def create_mcp(config: Config) -> FastMCP:
                 if current_doc:
                     context_parts.append(
                         f"The user is currently viewing this document:\n"
-                        f"Title: {current_doc.get('title', 'Untitled')}\n"
-                        f"Source: {current_doc.get('source', '?')}\n"
-                        f"Path: {current_doc.get('file_path', '?')}\n\n"
-                        f"{current_doc.get('content', '')}"
+                        + f"Title: {current_doc.get('title', 'Untitled')}\n"
+                        + f"Source: {current_doc.get('source', '?')}\n"
+                        + f"Path: {current_doc.get('file_path', '?')}\n\n"
+                        + f"{current_doc.get('content', '')}"
                     )
 
             # Add document inventory with indexing stats
@@ -363,9 +383,9 @@ def create_mcp(config: Config) -> FastMCP:
             if search_results:
                 rag_context = "\n\n---\n\n".join(
                     f"**{r['metadata'].get('title', 'Untitled')}** "
-                    f"(source: {r['metadata'].get('source', '?')}, "
-                    f"file: {r['metadata'].get('file_path', '?')})\n\n"
-                    f"{r['content']}"
+                    + f"(source: {r['metadata'].get('source', '?')}, "
+                    + f"file: {r['metadata'].get('file_path', '?')})\n\n"
+                    + f"{r['content']}"
                     for r in search_results
                 )
                 context_parts.append(f"Relevant documentation excerpts:\n\n{rag_context}")
@@ -373,9 +393,11 @@ def create_mcp(config: Config) -> FastMCP:
             system_prompt = build_system_prompt(context_parts)
 
             # Build messages from history + current
-            messages: list[dict[str, str]] = []
+            messages: list[MessageParam] = []
             for h in history[-10:]:  # Keep last 10 exchanges
-                messages.append({"role": h["role"], "content": h["content"]})
+                role = h["role"]
+                if role in ("user", "assistant"):
+                    messages.append({"role": role, "content": h["content"]})  # pyright: ignore[reportArgumentType]
             messages.append({"role": "user", "content": message})
 
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -393,7 +415,8 @@ def create_mcp(config: Config) -> FastMCP:
                 messages=messages,
             )
 
-            reply = response.content[0].text if response.content else ""
+            first_block = response.content[0] if response.content else None
+            reply = first_block.text if isinstance(first_block, TextBlock) else ""
             return _cors_json({"reply": reply})
 
         except anthropic.APIError as exc:
@@ -406,7 +429,7 @@ def create_mcp(config: Config) -> FastMCP:
     # ---- Tools ----------------------------------------------------------
 
     @server.tool()
-    def search_docs(query: str, num_results: int = 10, source: str = "") -> str:
+    def search_docs(query: str, num_results: int = 10, source: str = "") -> str:  # pyright: ignore[reportUnusedFunction]
         """Semantic search across all indexed documentation.
 
         Use this to find documentation relevant to a natural language question,
@@ -438,21 +461,21 @@ def create_mcp(config: Config) -> FastMCP:
         if not results:
             return "No matching documents found."
 
-        output_parts = []
+        output_parts: list[str] = []
         for r in results:
             meta = r.get("metadata", {})
             output_parts.append(
                 f"--- {meta.get('title', 'Untitled')} ---\n"
-                f"Source: {meta.get('source', '?')} | "
-                f"File: {meta.get('file_path', '?')} | "
-                f"Score: {r.get('score', '?'):.4f}\n\n"
-                f"{r.get('content', '')}\n"
+                + f"Source: {meta.get('source', '?')} | "
+                + f"File: {meta.get('file_path', '?')} | "
+                + f"Score: {r.get('score', '?'):.4f}\n\n"
+                + f"{r.get('content', '')}\n"
             )
 
         return "\n".join(output_parts)
 
     @server.tool()
-    def query_docs(
+    def query_docs(  # pyright: ignore[reportUnusedFunction]
         source: str = "",
         file_path_contains: str = "",
         title_contains: str = "",
@@ -490,7 +513,7 @@ def create_mcp(config: Config) -> FastMCP:
         return json.dumps(docs, indent=2, default=str)
 
     @server.tool()
-    def get_document(doc_id: str) -> str:
+    def get_document(doc_id: str) -> str:  # pyright: ignore[reportUnusedFunction]
         """Retrieve a specific document by its ID.
 
         Document IDs have the format "source_name:relative/path" for parent
@@ -506,7 +529,7 @@ def create_mcp(config: Config) -> FastMCP:
         return json.dumps(doc, indent=2, default=str)
 
     @server.tool()
-    def list_sources() -> str:
+    def list_sources() -> str:  # pyright: ignore[reportUnusedFunction]
         """List all configured documentation sources and their indexing status.
 
         Returns source names, file counts, chunk counts, and last indexed time.
@@ -520,7 +543,7 @@ def create_mcp(config: Config) -> FastMCP:
         return json.dumps(summary, indent=2, default=str)
 
     @server.tool()
-    def ingestion_status() -> str:
+    def ingestion_status() -> str:  # pyright: ignore[reportUnusedFunction]
         """Get detailed indexing status for all documentation sources.
 
         Returns per-source stats including file counts, chunk counts,
@@ -547,7 +570,7 @@ def create_mcp(config: Config) -> FastMCP:
         return json.dumps(result, indent=2, default=str)
 
     @server.tool()
-    def reindex(source: str = "") -> str:
+    def reindex(source: str = "") -> str:  # pyright: ignore[reportUnusedFunction]
         """Trigger an immediate re-indexing of documentation sources.
 
         Args:
@@ -597,18 +620,24 @@ def run_server() -> None:
     setup_logging(level=log_level, json_output=json_output)
 
     mcp = init_app()
+    assert _config is not None
+    assert _ingester is not None
+    assert _kb is not None
+    cfg = _config
+    ingester = _ingester
+    kb = _kb
 
     # Log server configuration
     logger.info(
         "Starting documentation MCP server on %s:%d",
-        _config.server_host,
-        _config.server_port,
+        cfg.server_host,
+        cfg.server_port,
         extra={"event": "startup"},
     )
     logger.info(
         "Configured %d source(s): %s",
-        len(_config.sources),
-        [s.name for s in _config.sources],
+        len(cfg.sources),
+        [s.name for s in cfg.sources],
         extra={"event": "startup"},
     )
 
@@ -628,10 +657,10 @@ def run_server() -> None:
 
     # Log non-secret environment variables
     env_vars = {
-        "DOCSERVER_DATA_DIR": _config.data_dir,
-        "DOCSERVER_POLL_INTERVAL": str(_config.poll_interval_seconds),
-        "DOCSERVER_HOST": _config.server_host,
-        "DOCSERVER_PORT": str(_config.server_port),
+        "DOCSERVER_DATA_DIR": cfg.data_dir,
+        "DOCSERVER_POLL_INTERVAL": str(cfg.poll_interval_seconds),
+        "DOCSERVER_HOST": cfg.server_host,
+        "DOCSERVER_PORT": str(cfg.server_port),
         "DOCSERVER_LOG_FORMAT": os.environ.get("DOCSERVER_LOG_FORMAT", "json"),
         "DOCSERVER_LOG_LEVEL": os.environ.get("DOCSERVER_LOG_LEVEL", "INFO"),
         "DOCSERVER_MODEL_DIR": os.environ.get("DOCSERVER_MODEL_DIR", "(default)"),
@@ -643,10 +672,10 @@ def run_server() -> None:
         extra={"event": "startup", "env": env_vars},
     )
 
-    _ingester.start()
+    ingester.start()
 
     try:
         mcp.run(transport="streamable-http")
     finally:
-        _ingester.stop()
-        _kb.close()
+        ingester.stop()
+        kb.close()

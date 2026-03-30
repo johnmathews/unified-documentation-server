@@ -283,7 +283,8 @@ def create_mcp(config: Config) -> FastMCP:
         """Serve a raw file from disk by doc_id (e.g. for PDFs)."""
         try:
             kb = _get_kb()
-            doc_id = unquote(str(request.path_params["doc_id"]))
+            raw_file_doc_id: str = str(request.path_params["doc_id"])  # pyright: ignore[reportAny]
+            doc_id = unquote(raw_file_doc_id)
             doc = kb.get_document(doc_id)
             if doc is None:
                 return _cors_json({"error": "Not found"}, 404)
@@ -310,7 +311,7 @@ def create_mcp(config: Config) -> FastMCP:
 
             # Security: ensure the resolved path is within the repo root.
             try:
-                absolute_path.resolve().relative_to(repo_root.resolve())
+                _ = absolute_path.resolve().relative_to(repo_root.resolve())
             except ValueError:
                 return _cors_json({"error": "Invalid path"}, 400)
 
@@ -352,13 +353,13 @@ def create_mcp(config: Config) -> FastMCP:
 
         try:
             kb = _get_kb()
-            body: dict[str, Any] = await request.json()  # pyright: ignore[reportExplicitAny]
-            message: str = body.get("message", "")
+            body: dict[str, Any] = await request.json()  # pyright: ignore[reportExplicitAny, reportAny]
+            message: str = body.get("message", "")  # pyright: ignore[reportAny]
             if not message:
                 return _cors_json({"error": "Missing 'message'"}, 400)
 
-            current_doc_id: str | None = body.get("doc_id")
-            history: list[dict[str, str]] = body.get("history", [])
+            current_doc_id: str | None = body.get("doc_id")  # pyright: ignore[reportAny]
+            history: list[dict[str, str]] = body.get("history", [])  # pyright: ignore[reportAny]
 
             # Build context from current page + RAG search
             context_parts: list[str] = []
@@ -367,7 +368,7 @@ def create_mcp(config: Config) -> FastMCP:
                 current_doc = kb.get_document(current_doc_id)
                 if current_doc:
                     context_parts.append(
-                        f"The user is currently viewing this document:\n"
+                        "The user is currently viewing this document:\n"
                         + f"Title: {current_doc.get('title', 'Untitled')}\n"
                         + f"Source: {current_doc.get('source', '?')}\n"
                         + f"Path: {current_doc.get('file_path', '?')}\n\n"
@@ -397,7 +398,7 @@ def create_mcp(config: Config) -> FastMCP:
             for h in history[-10:]:  # Keep last 10 exchanges
                 role = h["role"]
                 if role in ("user", "assistant"):
-                    messages.append({"role": role, "content": h["content"]})  # pyright: ignore[reportArgumentType]
+                    messages.append({"role": role, "content": h["content"]})
             messages.append({"role": "user", "content": message})
 
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")

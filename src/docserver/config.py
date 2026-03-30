@@ -55,7 +55,7 @@ class RepoSource:
 class Config:
     sources: list[RepoSource]
     data_dir: str = "/data"
-    poll_interval_seconds: int = 300
+    poll_interval_seconds: int = 30
     server_host: str = "0.0.0.0"
     server_port: int = 8080
 
@@ -130,7 +130,9 @@ def load_config(path: str | None = None) -> Config:
             raw = yaml.safe_load(fh) or {}
         logger.info("Config file parsed successfully", extra={"event": "config"})
     else:
-        logger.warning("Config file not found at %s, using defaults", path, extra={"event": "config"})
+        logger.warning(
+            "Config file not found at %s, using defaults", path, extra={"event": "config"}
+        )
 
     sources = _parse_sources(raw.get("sources", []))
 

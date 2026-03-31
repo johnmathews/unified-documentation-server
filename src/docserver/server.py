@@ -6,6 +6,8 @@ import json
 import logging
 import mimetypes
 import os
+import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -614,6 +616,19 @@ def init_app(config: Config | None = None) -> FastMCP:
     return create_mcp(config)
 
 
+def _check_port(host: str, port: int) -> None:
+    """Raise OSError if *host*:*port* cannot be bound.
+
+    Opens and immediately closes a TCP socket to detect conflicts before
+    uvicorn tries — giving us the chance to log a clear error message.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+    finally:
+        sock.close()
+
+
 def run_server() -> None:
     """Start the ingestion scheduler and run the MCP server."""
     json_output = os.environ.get("DOCSERVER_LOG_FORMAT", "json") == "json"
@@ -672,6 +687,24 @@ def run_server() -> None:
         env_vars,
         extra={"event": "startup", "env": env_vars},
     )
+
+    # Pre-flight check: verify the port is available before starting background
+    # work.  Without this, uvicorn silently fails to bind and the process looks
+    # like it exits after indexing finishes (because ingester.stop(wait=True)
+    # keeps the process alive until the current job completes).
+    try:
+        _check_port(cfg.server_host, cfg.server_port)
+    except OSError as exc:
+        logger.critical(
+            "Cannot bind to %s:%d — %s. "
+            "Is another instance already running? "
+            "(Use DOCSERVER_PORT to choose a different port.)",
+            cfg.server_host,
+            cfg.server_port,
+            exc,
+            extra={"event": "port_unavailable"},
+        )
+        sys.exit(1)
 
     ingester.start()
 

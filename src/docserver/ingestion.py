@@ -458,6 +458,18 @@ class RepoManager:
 # DocumentParser
 # ---------------------------------------------------------------------------
 
+# Words that should always be fully uppercased in titles.
+_UPPERCASE_WORDS = re.compile(r"\bai\b", re.IGNORECASE)
+
+_UPPERCASE_MAP: dict[str, str] = {
+    "ai": "AI",
+}
+
+
+def _normalize_title(title: str) -> str:
+    """Apply house-style casing rules to a document title."""
+    return _UPPERCASE_WORDS.sub(lambda m: _UPPERCASE_MAP[m.group(0).lower()], title)
+
 
 class DocumentParser:
     """Parses individual markdown files into document dicts ready for the KB."""
@@ -565,8 +577,8 @@ class DocumentParser:
         for line in content.splitlines():
             stripped = line.strip()
             if stripped.startswith("#"):
-                return stripped.lstrip("#").strip()
-        return file_path.stem
+                return _normalize_title(stripped.lstrip("#").strip())
+        return _normalize_title(file_path.stem)
 
     @staticmethod
     def _git_created_at(file_path: Path, repo_root: Path) -> str | None:

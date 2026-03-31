@@ -1,6 +1,7 @@
 """Tests for the MCP server tools."""
 
 import json
+import socket
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from starlette.testclient import TestClient
 
 import docserver.server as server_module
 from docserver.config import Config, RepoSource
+from docserver.server import _check_port
 
 
 @pytest.fixture
@@ -400,3 +402,25 @@ class TestInputValidation:
         """limit=9999 should be clamped to 100."""
         result = _call_tool(app, "query_docs", limit=9999)
         assert isinstance(result, str)
+
+
+class TestCheckPort:
+    """Tests for the _check_port pre-flight helper."""
+
+    def test_free_port_succeeds(self) -> None:
+        """_check_port should not raise when the port is available."""
+        # Bind to port 0 to let the OS pick a free port, then check that port.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            _, free_port = s.getsockname()
+        # Port is now released — _check_port should succeed.
+        _check_port("127.0.0.1", free_port)
+
+    def test_occupied_port_raises(self) -> None:
+        """_check_port should raise OSError when the port is already bound."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            _, occupied_port = s.getsockname()
+            with pytest.raises(OSError):
+                _check_port("127.0.0.1", occupied_port)

@@ -15,6 +15,7 @@ from docserver.ingestion import (
     Ingester,
     RepoManager,
     _chunk_content,
+    _normalize_title,
     _normalise_repo_url,
     _parse_sections,
 )
@@ -276,6 +277,42 @@ class TestDocumentParser:
     def test_binary_extensions(self) -> None:
         """BINARY_EXTENSIONS should include .pdf."""
         assert ".pdf" in DocumentParser.BINARY_EXTENSIONS
+
+    def test_title_ai_uppercased(self, tmp_path: Path) -> None:
+        """'Ai' in a heading should become 'AI'."""
+        md = tmp_path / "test.md"
+        md.write_text("# Using Ai For Automation\n\nBody.")
+
+        parser = DocumentParser()
+        doc = parser.parse_markdown(md, "src", tmp_path)
+        assert doc["metadata"]["title"] == "Using AI For Automation"
+
+    def test_title_ai_filename_fallback(self, tmp_path: Path) -> None:
+        """'ai' in a filename stem should become 'AI'."""
+        md = tmp_path / "ai-tools.md"
+        md.write_text("No heading here.")
+
+        parser = DocumentParser()
+        doc = parser.parse_markdown(md, "src", tmp_path)
+        assert doc["metadata"]["title"] == "AI-tools"
+
+
+class TestNormalizeTitle:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Using Ai for docs", "Using AI for docs"),
+            ("ai at the start", "AI at the start"),
+            ("ends with ai", "ends with AI"),
+            ("AI already uppercase", "AI already uppercase"),
+            ("No special words", "No special words"),
+            ("ai", "AI"),
+            ("airbag is not ai", "airbag is not AI"),
+            ("Contains aI mixed case", "Contains AI mixed case"),
+        ],
+    )
+    def test_normalize_title(self, raw: str, expected: str) -> None:
+        assert _normalize_title(raw) == expected
 
 
 class TestRepoManager:

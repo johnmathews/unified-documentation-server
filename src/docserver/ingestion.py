@@ -1097,7 +1097,11 @@ class Ingester:
                 return source.name, None
 
         if len(targets) > 1:
-            with ThreadPoolExecutor(max_workers=min(len(targets), 4)) as pool:
+            # Limit to 2 workers to avoid fork() failures in memory-constrained
+            # containers. Each git-fetch spawns subprocesses that temporarily
+            # duplicate the Python process's address space; with an ONNX model
+            # and ChromaDB loaded, 4 parallel forks can exceed the mem_limit.
+            with ThreadPoolExecutor(max_workers=min(len(targets), 2)) as pool:
                 futures = {pool.submit(_sync_source, s): s for s in targets}
                 for future in as_completed(futures):
                     name, changed = future.result()

@@ -886,8 +886,16 @@ class Ingester:
 
         Each value is an ISO 8601 UTC timestamp recording when the source was
         last successfully synced, regardless of whether any content changed.
+        Uses the in-memory cache with DB as fallback (covers server restarts).
         """
-        return dict(self._last_check_times)
+        # Merge DB-persisted values with in-memory cache (cache wins on conflict).
+        db_statuses = self.kb.get_source_statuses()
+        merged: dict[str, str] = {}
+        for name, status in db_statuses.items():
+            if status["last_checked"] is not None:
+                merged[name] = status["last_checked"]
+        merged.update(self._last_check_times)
+        return merged
 
     def cleanup_orphaned_sources(self) -> dict[str, int]:
         """Remove KB entries and clone dirs for sources no longer in the config.
@@ -1075,6 +1083,7 @@ class Ingester:
             try:
                 changed = manager.sync()
                 self._last_check_times[source.name] = datetime.now(UTC).isoformat()
+                self.kb.update_source_check(source.name)
                 logger.info(
                     "Sync complete for '%s': changed=%s",
                     source.name,
@@ -1082,7 +1091,7 @@ class Ingester:
                     extra={"event": "sync_done", "source": source.name, "changed": changed},
                 )
                 return source.name, changed
-            except Exception:
+            except Exception as exc:
                 display_path = re.sub(r"://[^@]+@", "://<redacted>@", source.path) if source.is_remote else source.path
                 logger.exception(
                     "Unexpected error syncing source '%s' (path: %s, remote: %s, branch: %s). "
@@ -1094,6 +1103,7 @@ class Ingester:
                     source.branch,
                     extra={"event": "sync_error", "source": source.name, "path": display_path},
                 )
+                self.kb.update_source_check(source.name, error=str(exc))
                 return source.name, None
 
         if len(targets) > 1:

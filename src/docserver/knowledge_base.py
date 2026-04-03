@@ -36,6 +36,14 @@ class SourceSummary(TypedDict):
     last_indexed: str | None
 
 
+class SourceStatus(TypedDict):
+    source: str
+    last_checked: str | None
+    last_error: str | None
+    last_error_at: str | None
+    consecutive_failures: int
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
     doc_id        TEXT PRIMARY KEY,
@@ -57,6 +65,14 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents (source);
 CREATE INDEX IF NOT EXISTS idx_documents_file_path ON documents (file_path);
 CREATE INDEX IF NOT EXISTS idx_documents_is_chunk ON documents (is_chunk);
+
+CREATE TABLE IF NOT EXISTS source_status (
+    source               TEXT PRIMARY KEY,
+    last_checked         TEXT,
+    last_error           TEXT,
+    last_error_at        TEXT,
+    consecutive_failures INTEGER DEFAULT 0
+);
 """
 
 _MIGRATIONS = [
@@ -733,6 +749,64 @@ class KnowledgeBase:
             )
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Source status tracking
+    # ------------------------------------------------------------------
+
+    def update_source_check(
+        self, source: str, *, error: str | None = None,
+    ) -> None:
+        """Record the result of a scan attempt for *source*.
+
+        On success (``error`` is None): set ``last_checked`` to now and reset
+        ``consecutive_failures`` to 0, and clear the last error.
+        On failure: increment ``consecutive_failures`` and record the error.
+        """
+        now = _now_iso()
+        with self._connect() as conn:
+            if error is None:
+                conn.execute(
+                    """INSERT INTO source_status
+                           (source, last_checked, last_error, last_error_at, consecutive_failures)
+                       VALUES (?, ?, NULL, NULL, 0)
+                       ON CONFLICT(source) DO UPDATE SET
+                           last_checked = excluded.last_checked,
+                           last_error = NULL,
+                           last_error_at = NULL,
+                           consecutive_failures = 0
+                    """,
+                    (source, now),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO source_status
+                           (source, last_checked, last_error, last_error_at, consecutive_failures)
+                       VALUES (?, NULL, ?, ?, 1)
+                       ON CONFLICT(source) DO UPDATE SET
+                           last_error = excluded.last_error,
+                           last_error_at = excluded.last_error_at,
+                           consecutive_failures = consecutive_failures + 1
+                    """,
+                    (source, error, now),
+                )
+
+    def get_source_statuses(self) -> dict[str, SourceStatus]:
+        """Return status records for all sources, keyed by source name."""
+        rows = self._fetchall(
+            "SELECT source, last_checked, last_error, last_error_at, consecutive_failures "
+            "FROM source_status"
+        )
+        return {
+            str(row["source"]): SourceStatus(
+                source=str(row["source"]),
+                last_checked=cast("str | None", row["last_checked"]),
+                last_error=cast("str | None", row["last_error"]),
+                last_error_at=cast("str | None", row["last_error_at"]),
+                consecutive_failures=int(row["consecutive_failures"]),
+            )
+            for row in rows
+        }
 
     def close(self) -> None:
         """Close connections. ChromaDB PersistentClient manages its own lifecycle."""

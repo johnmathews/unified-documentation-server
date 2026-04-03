@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from starlette.requests import Request
 from docserver.ingestion import Ingester
-from docserver.knowledge_base import KnowledgeBase, SourceSummary
+from docserver.knowledge_base import KnowledgeBase, SourceStatus, SourceSummary
 from docserver.logging_config import setup_logging
 
 # Scalar type alias matching knowledge_base.Scalar
@@ -174,6 +174,43 @@ def create_mcp(config: Config) -> FastMCP:
 
     # ---- Health endpoint ------------------------------------------------
 
+    def _compute_source_status(
+        status_row: SourceStatus | None,
+        poll_interval: int,
+    ) -> str:
+        """Derive a per-source health label from its status record.
+
+        Returns one of: ``"healthy"``, ``"warning"``, ``"error"``, ``"unknown"``.
+        """
+        if status_row is None:
+            return "unknown"
+
+        # Any consecutive failures -> escalate based on count.
+        failures = status_row["consecutive_failures"]
+        if failures >= 2:
+            return "error"
+        if failures == 1:
+            return "warning"
+
+        last_checked = status_row["last_checked"]
+        if last_checked is None:
+            return "unknown"
+
+        # Check staleness relative to poll interval.
+        from datetime import UTC, datetime
+
+        try:
+            checked_dt = datetime.fromisoformat(last_checked)
+            age_seconds = (datetime.now(UTC) - checked_dt).total_seconds()
+        except (ValueError, TypeError):
+            return "unknown"
+
+        if age_seconds > poll_interval * 5:
+            return "error"
+        if age_seconds > poll_interval * 2:
+            return "warning"
+        return "healthy"
+
     @server.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         try:
@@ -181,23 +218,50 @@ def create_mcp(config: Config) -> FastMCP:
             ingester = _get_ingester()
             summary = kb.get_sources_summary()
             last_check_times = ingester.get_last_check_times()
-            # Merge last_checked into each source's summary data.
-            sources_with_check: list[dict[str, str | int | None]] = [
-                {
-                    "source": src["source"],
-                    "file_count": src["file_count"],
-                    "chunk_count": src["chunk_count"],
-                    "last_indexed": src["last_indexed"],
-                    "last_checked": last_check_times.get(src["source"]),
-                }
-                for src in summary
-            ]
+            source_statuses = kb.get_source_statuses()
+            poll_interval = config.poll_interval_seconds
+
+            sources_out: list[dict[str, str | int | None]] = []
+            per_source_labels: list[str] = []
+
+            for src in summary:
+                name = src["source"]
+                st = source_statuses.get(name)
+                label = _compute_source_status(st, poll_interval)
+                per_source_labels.append(label)
+
+                sources_out.append(
+                    {
+                        "source": name,
+                        "source_status": label,
+                        "file_count": src["file_count"],
+                        "chunk_count": src["chunk_count"],
+                        "last_indexed": src["last_indexed"],
+                        "last_checked": last_check_times.get(name),
+                        "last_error": st["last_error"] if st else None,
+                        "last_error_at": st["last_error_at"] if st else None,
+                        "consecutive_failures": st["consecutive_failures"] if st else 0,
+                    }
+                )
+
+            # Overall status: error if ALL sources are error/unknown,
+            # degraded if ANY source is warning/error, else healthy.
+            if not per_source_labels:
+                overall = "healthy"
+            elif all(s in ("error", "unknown") for s in per_source_labels):
+                overall = "error"
+            elif any(s in ("warning", "error") for s in per_source_labels):
+                overall = "degraded"
+            else:
+                overall = "healthy"
+
             return JSONResponse(
                 {
-                    "status": "ok",
+                    "status": overall,
                     "total_sources": len(summary),
                     "total_chunks": sum(s.get("chunk_count", 0) for s in summary),
-                    "sources": sources_with_check,
+                    "poll_interval_seconds": poll_interval,
+                    "sources": sources_out,
                 }
             )
         except Exception:

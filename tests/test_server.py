@@ -188,24 +188,29 @@ class TestReindex:
 
 class TestHealthEndpoint:
     def test_health_returns_ok(self, app) -> None:
-        """GET /health should return JSON with status 'ok' and per-source detail."""
+        """GET /health should return JSON with overall and per-source status."""
         starlette_app = app.streamable_http_app()
         client = TestClient(starlette_app)
         response = client.get("/health")
         assert response.status_code == 200
         body = response.json()
-        assert body["status"] == "ok"
+        assert body["status"] in ("healthy", "degraded", "error")
         assert "total_sources" in body
         assert "total_chunks" in body
+        assert "poll_interval_seconds" in body
         assert "sources" in body
         assert isinstance(body["sources"], list)
         # Verify per-source structure if sources exist
         if body["sources"]:
             src = body["sources"][0]
             assert "source" in src
+            assert "source_status" in src
+            assert src["source_status"] in ("healthy", "warning", "error", "unknown")
             assert "file_count" in src
             assert "chunk_count" in src
             assert "last_indexed" in src
+            assert "last_error" in src
+            assert "consecutive_failures" in src
 
     def test_health_includes_last_checked(self, app) -> None:
         """GET /health should include last_checked from ingester check times."""
@@ -254,6 +259,90 @@ class TestHealthEndpoint:
         assert response.status_code == 503
         body = response.json()
         assert body["status"] == "error"
+
+    def test_health_source_status_healthy_after_check(self, app) -> None:
+        """A source with a recent successful check should be 'healthy'."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        # Record a successful check for the source.
+        kb = server_module._get_kb()
+        kb.update_source_check("docs")
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        src = next(s for s in body["sources"] if s["source"] == "docs")
+        assert src["source_status"] == "healthy"
+        assert src["last_error"] is None
+        assert src["consecutive_failures"] == 0
+
+    def test_health_source_status_warning_on_one_failure(self, app) -> None:
+        """A source with 1 consecutive failure should be 'warning'."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        kb = server_module._get_kb()
+        kb.update_source_check("docs", error="git fetch failed")
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        src = next(s for s in body["sources"] if s["source"] == "docs")
+        assert src["source_status"] == "warning"
+        assert src["last_error"] == "git fetch failed"
+        assert src["consecutive_failures"] == 1
+
+    def test_health_source_status_error_on_two_failures(self, app) -> None:
+        """A source with 2+ consecutive failures should be 'error'."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        kb = server_module._get_kb()
+        kb.update_source_check("docs", error="fail 1")
+        kb.update_source_check("docs", error="fail 2")
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        src = next(s for s in body["sources"] if s["source"] == "docs")
+        assert src["source_status"] == "error"
+        assert src["consecutive_failures"] == 2
+
+    def test_health_overall_degraded(self, app) -> None:
+        """Overall status should be 'degraded' when some sources have issues."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        kb = server_module._get_kb()
+        # Mark the source as having one failure.
+        kb.update_source_check("docs", error="network error")
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        # With a single source that has a warning, overall should be degraded.
+        assert body["status"] == "degraded"
+
+    def test_health_source_recovers_after_success(self, app) -> None:
+        """A source should recover to 'healthy' after a successful check."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        kb = server_module._get_kb()
+        # First, create a failure.
+        kb.update_source_check("docs", error="fail")
+        kb.update_source_check("docs", error="fail again")
+        # Then, a successful check should reset.
+        kb.update_source_check("docs")
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        src = next(s for s in body["sources"] if s["source"] == "docs")
+        assert src["source_status"] == "healthy"
+        assert src["last_error"] is None
+        assert src["consecutive_failures"] == 0
 
 
 class TestRescanEndpoint:

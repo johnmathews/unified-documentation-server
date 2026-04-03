@@ -141,7 +141,7 @@ Built with FastMCP, exposes five tools over streamable HTTP:
 ### Endpoints
 
 - `/mcp` — MCP protocol endpoint (streamable HTTP transport)
-- `/health` — Health check returning status, total source/chunk counts, and per-source breakdown (file count, chunk count, last indexed time, last checked time)
+- `/health` — Health check returning overall status (`healthy`/`degraded`/`error`), poll interval, total source/chunk counts, and per-source breakdown (source status [`healthy`/`warning`/`error`/`unknown`], file count, chunk count, last indexed time, last checked time, last error, consecutive failure count). Per-source status is persisted in a `source_status` SQLite table so it survives server restarts.
 - `/rescan` (POST) — Trigger an immediate ingestion cycle. Optional `?source=name` query param to rescan a single source. Returns stats with duration.
 - `/api/tree` (GET) — Document tree organized by source and category. Each source has `root_docs` (root-level files like README.md), `docs` (files in subdirectories), `journal` (files under journal/), `engineering_team` (files under .engineering-team/), and `pdf` (any file ending in .pdf).
 - `/api/documents/:doc_id` (GET) — Full document content reassembled from chunks.

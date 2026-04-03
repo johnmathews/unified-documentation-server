@@ -767,3 +767,64 @@ def test_search_documents_includes_title_only_matches(kb):
     results = kb.search_documents("Kubernetes")
     doc_ids = [r["doc_id"] for r in results]
     assert "src:xyzzy.md" in doc_ids
+
+
+# ------------------------------------------------------------------
+# Source status tracking
+# ------------------------------------------------------------------
+
+
+def test_update_source_check_success(kb):
+    """Successful check sets last_checked and clears errors."""
+    kb.update_source_check("src")
+    statuses = kb.get_source_statuses()
+    assert "src" in statuses
+    assert statuses["src"]["last_checked"] is not None
+    assert statuses["src"]["last_error"] is None
+    assert statuses["src"]["consecutive_failures"] == 0
+
+
+def test_update_source_check_failure(kb):
+    """Failed check records error and increments consecutive_failures."""
+    kb.update_source_check("src", error="git fetch failed")
+    statuses = kb.get_source_statuses()
+    assert statuses["src"]["last_error"] == "git fetch failed"
+    assert statuses["src"]["last_error_at"] is not None
+    assert statuses["src"]["consecutive_failures"] == 1
+
+
+def test_update_source_check_consecutive_failures(kb):
+    """Multiple failures increment the counter."""
+    kb.update_source_check("src", error="fail 1")
+    kb.update_source_check("src", error="fail 2")
+    kb.update_source_check("src", error="fail 3")
+    statuses = kb.get_source_statuses()
+    assert statuses["src"]["consecutive_failures"] == 3
+
+
+def test_update_source_check_success_resets_failures(kb):
+    """A success after failures resets the counter and clears the error."""
+    kb.update_source_check("src", error="fail 1")
+    kb.update_source_check("src", error="fail 2")
+    kb.update_source_check("src")
+    statuses = kb.get_source_statuses()
+    assert statuses["src"]["consecutive_failures"] == 0
+    assert statuses["src"]["last_error"] is None
+    assert statuses["src"]["last_error_at"] is None
+    assert statuses["src"]["last_checked"] is not None
+
+
+def test_get_source_statuses_empty(kb):
+    """Returns empty dict when no status records exist."""
+    statuses = kb.get_source_statuses()
+    assert statuses == {}
+
+
+def test_get_source_statuses_multiple_sources(kb):
+    """Returns status for each tracked source."""
+    kb.update_source_check("src-a")
+    kb.update_source_check("src-b", error="timeout")
+    statuses = kb.get_source_statuses()
+    assert len(statuses) == 2
+    assert statuses["src-a"]["consecutive_failures"] == 0
+    assert statuses["src-b"]["consecutive_failures"] == 1

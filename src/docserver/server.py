@@ -111,6 +111,8 @@ def build_inventory_context(
             ("Documentation", "docs"),
             ("Journal", "journal"),
             ("Engineering team", "engineering_team"),
+            ("Skills", "skills"),
+            ("Runbooks", "runbooks"),
         ]:
             raw_docs = src.get(key, [])
             docs = raw_docs if isinstance(raw_docs, list) else []

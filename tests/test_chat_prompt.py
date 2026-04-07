@@ -20,6 +20,8 @@ def _make_tree(
     sources: list[str] | None = None,
     with_root_docs: bool = True,
     with_engineering: bool = True,
+    with_skills: bool = False,
+    with_runbooks: bool = False,
 ) -> list[dict]:
     """Build a minimal doc_tree fixture."""
     if sources is None:
@@ -64,6 +66,15 @@ def _make_tree(
         if with_engineering:
             entry["engineering_team"] = [
                 {"title": "Eval Report", "file_path": ".engineering-team/evaluation-report.md", "created_at": "2026-03-25T00:00:00+00:00", "modified_at": "2026-03-25T22:00:00+00:00", "size_bytes": 13000},
+            ]
+        if with_skills:
+            entry["skills"] = [
+                {"title": "Weather Skill", "file_path": "container/skills/weather/skill.md", "created_at": "2026-03-20T00:00:00+00:00", "modified_at": "2026-03-20T00:00:00+00:00", "size_bytes": 2000},
+                {"title": "Calendar Skill", "file_path": "container/skills/calendar/skill.md", "created_at": "2026-03-21T00:00:00+00:00", "modified_at": "2026-03-21T00:00:00+00:00", "size_bytes": 1800},
+            ]
+        if with_runbooks:
+            entry["runbooks"] = [
+                {"title": "Deploy Guide", "file_path": "runbooks/deploy-guide.md", "created_at": "2026-03-18T00:00:00+00:00", "modified_at": "2026-03-18T00:00:00+00:00", "size_bytes": 3500},
             ]
         tree.append(entry)
     return tree
@@ -187,6 +198,21 @@ class TestBuildInventoryContext:
         result = build_inventory_context(tree, stats)
         assert "Engineering team (1)" in result
         assert "Eval Report" in result
+
+    def test_includes_skills_category(self):
+        tree = _make_tree(with_skills=True)
+        stats = _make_stats()
+        result = build_inventory_context(tree, stats)
+        assert "Skills (2)" in result
+        assert "Weather Skill" in result
+        assert "Calendar Skill" in result
+
+    def test_includes_runbooks_category(self):
+        tree = _make_tree(with_runbooks=True)
+        stats = _make_stats()
+        result = build_inventory_context(tree, stats)
+        assert "Runbooks (1)" in result
+        assert "Deploy Guide" in result
 
     def test_includes_created_at_dates(self):
         tree = _make_tree()

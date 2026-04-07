@@ -460,6 +460,85 @@ def test_get_document_tree_pdf_category(kb):
     assert src["docs"][0]["title"] == "Guide"
 
 
+def test_get_document_tree_skills_category(kb):
+    """Files under a skills/ directory should appear in the 'skills' category."""
+    kb.upsert_document(
+        "nanoclaw:container/skills/weather/skill.md",
+        "",
+        {
+            "source": "nanoclaw",
+            "file_path": "container/skills/weather/skill.md",
+            "title": "Weather Skill",
+            "is_chunk": False,
+        },
+    )
+    kb.upsert_document(
+        "nanoclaw:container/skills/calendar/skill.md",
+        "",
+        {
+            "source": "nanoclaw",
+            "file_path": "container/skills/calendar/skill.md",
+            "title": "Calendar Skill",
+            "is_chunk": False,
+        },
+    )
+    kb.upsert_document(
+        "nanoclaw:docs/guide.md",
+        "",
+        {"source": "nanoclaw", "file_path": "docs/guide.md", "title": "Guide", "is_chunk": False},
+    )
+
+    tree = kb.get_document_tree()
+    assert len(tree) == 1
+    src = tree[0]
+    assert len(src["skills"]) == 2
+    assert {d["title"] for d in src["skills"]} == {"Weather Skill", "Calendar Skill"}
+    # Skills should be sorted alphabetically by title
+    assert src["skills"][0]["title"] == "Calendar Skill"
+    assert src["skills"][1]["title"] == "Weather Skill"
+    # The markdown file should be in docs, not skills
+    assert len(src["docs"]) == 1
+
+
+def test_get_document_tree_runbooks_category(kb):
+    """Files under runbooks/ should appear in the 'runbooks' category."""
+    kb.upsert_document(
+        "nanoclaw:runbooks/deploy-guide.md",
+        "",
+        {
+            "source": "nanoclaw",
+            "file_path": "runbooks/deploy-guide.md",
+            "title": "Deploy Guide",
+            "is_chunk": False,
+        },
+    )
+    kb.upsert_document(
+        "nanoclaw:runbooks/incident-response.md",
+        "",
+        {
+            "source": "nanoclaw",
+            "file_path": "runbooks/incident-response.md",
+            "title": "Incident Response",
+            "is_chunk": False,
+        },
+    )
+    kb.upsert_document(
+        "nanoclaw:docs/readme.md",
+        "",
+        {"source": "nanoclaw", "file_path": "docs/readme.md", "title": "README", "is_chunk": False},
+    )
+
+    tree = kb.get_document_tree()
+    assert len(tree) == 1
+    src = tree[0]
+    assert len(src["runbooks"]) == 2
+    assert {d["title"] for d in src["runbooks"]} == {"Deploy Guide", "Incident Response"}
+    # Runbooks should be sorted alphabetically by title
+    assert src["runbooks"][0]["title"] == "Deploy Guide"
+    # The markdown file should be in docs, not runbooks
+    assert len(src["docs"]) == 1
+
+
 def test_get_full_document_reassembles_chunks(kb):
     """get_full_document should reassemble content from chunks for parent docs."""
     kb.upsert_document(

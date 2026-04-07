@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -10,6 +11,7 @@ import socket
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
@@ -17,6 +19,7 @@ from urllib.parse import unquote
 import anthropic
 from anthropic.types import MessageParam, TextBlock, ToolUseBlock
 from mcp.server.fastmcp import FastMCP
+from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 from starlette.responses import FileResponse, JSONResponse
 
 from docserver.config import Config, load_config
@@ -314,15 +317,126 @@ def _get_conversations() -> ConversationStore:
 
 def _cors_json(data: object, status_code: int = 200) -> JSONResponse:
     """Return a JSONResponse with CORS headers for the UI."""
-    return JSONResponse(
-        data,
-        status_code=status_code,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
+    return JSONResponse(data, status_code=status_code, headers=_CORS_HEADERS)
+
+
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+}
+
+
+@dataclass
+class _ChatRequest:
+    """Parsed and validated chat request shared by /api/chat and /api/chat/stream."""
+
+    system_blocks: list[dict[str, Any]]  # pyright: ignore[reportExplicitAny]
+    messages: list[MessageParam]
+    conversation_id: str | None
+    page_context: dict[str, str] | None
+    history: list[dict[str, str]]
+    user_message: str
+    model: str
+    client: anthropic.Anthropic
+
+
+async def _prepare_chat_request(request: Request) -> _ChatRequest | JSONResponse:
+    """Parse and validate a chat request body, build system blocks and messages.
+
+    Returns a _ChatRequest on success, or a JSONResponse error to return directly.
+    """
+    kb = _get_kb()
+    body: dict[str, Any] = await request.json()  # pyright: ignore[reportExplicitAny, reportAny]
+    message: str = body.get("message", "")  # pyright: ignore[reportAny]
+    if not message:
+        return _cors_json({"error": "Missing 'message'"}, 400)
+
+    current_doc_id: str | None = body.get("doc_id")  # pyright: ignore[reportAny]
+    page_context: dict[str, str] | None = body.get("page_context")  # pyright: ignore[reportAny]
+    history: list[dict[str, str]] = body.get("history", [])  # pyright: ignore[reportAny]
+    conversation_id: str | None = body.get("conversation_id")  # pyright: ignore[reportAny]
+
+    # Build system prompt as content blocks for caching
+    system_blocks: list[dict[str, Any]] = [  # pyright: ignore[reportExplicitAny]
+        {
+            "type": "text",
+            "text": CHAT_SYSTEM_INSTRUCTIONS,
+            "cache_control": {"type": "ephemeral"},
         },
+    ]
+
+    doc_tree = kb.get_document_tree()
+    source_stats = {s["source"]: s for s in kb.get_sources_summary()}
+    inventory = build_inventory_context(doc_tree, source_stats)
+
+    page_hint = ""
+    if current_doc_id:
+        page_hint = (
+            f"The user is viewing document '{current_doc_id}'. "
+            "Use get_document to read it if relevant."
+        )
+    elif page_context:
+        ctx_source = page_context.get("source", "")
+        ctx_category = page_context.get("category", "")
+        if ctx_source and ctx_category:
+            page_hint = f"The user is browsing '{ctx_category}' in '{ctx_source}'."
+        elif ctx_source:
+            page_hint = f"The user is browsing source '{ctx_source}'."
+
+    dynamic_parts = [inventory]
+    if page_hint:
+        dynamic_parts.append(page_hint)
+    system_blocks.append({"type": "text", "text": "\n\n".join(dynamic_parts)})
+
+    messages: list[MessageParam] = []
+    for h in history[-10:]:
+        role = h["role"]
+        if role in ("user", "assistant"):
+            messages.append({"role": role, "content": h["content"]})
+    messages.append({"role": "user", "content": message})
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return _cors_json({"error": "ANTHROPIC_API_KEY not configured on server"}, 503)
+
+    model = os.environ.get("DOCSERVER_CHAT_MODEL", CHAT_MODEL)
+    client = anthropic.Anthropic(api_key=api_key)
+
+    return _ChatRequest(
+        system_blocks=system_blocks,
+        messages=messages,
+        conversation_id=conversation_id,
+        page_context=page_context,
+        history=history,
+        user_message=message,
+        model=model,
+        client=client,
     )
+
+
+def _tool_result_summary(tool_name: str, result_text: str) -> str:
+    """Return a concise human-readable summary of a tool result."""
+    if "No matching documents found" in result_text or "not found" in result_text:
+        return "No results"
+    if tool_name == "search_docs":
+        count = result_text.count("\n\n") + 1 if result_text.strip() else 0
+        return f"{count} result{'s' if count != 1 else ''} found"
+    if tool_name == "query_docs":
+        try:
+            docs = json.loads(result_text)
+            return f"Found {len(docs)} document{'s' if len(docs) != 1 else ''}"
+        except (json.JSONDecodeError, TypeError):
+            return "Results returned"
+    if tool_name == "get_document":
+        return f"Document retrieved ({len(result_text):,} chars)"
+    if tool_name == "list_sources":
+        try:
+            sources = json.loads(result_text)
+            return f"Listed {len(sources)} source{'s' if len(sources) != 1 else ''}"
+        except (json.JSONDecodeError, TypeError):
+            return "Sources listed"
+    return f"{len(result_text):,} chars"
 
 
 def create_mcp(config: Config) -> FastMCP:
@@ -600,76 +714,16 @@ def create_mcp(config: Config) -> FastMCP:
             return _cors_json({})
 
         try:
+            req = await _prepare_chat_request(request)
+            if isinstance(req, JSONResponse):
+                return req
+
             kb = _get_kb()
-            body: dict[str, Any] = await request.json()  # pyright: ignore[reportExplicitAny, reportAny]
-            message: str = body.get("message", "")  # pyright: ignore[reportAny]
-            if not message:
-                return _cors_json({"error": "Missing 'message'"}, 400)
-
-            current_doc_id: str | None = body.get("doc_id")  # pyright: ignore[reportAny]
-            page_context: dict[str, str] | None = body.get("page_context")  # pyright: ignore[reportAny]
-            history: list[dict[str, str]] = body.get("history", [])  # pyright: ignore[reportAny]
-            conversation_id: str | None = body.get("conversation_id")  # pyright: ignore[reportAny]
-
-            # ---- Build system prompt as content blocks for caching ----
-            # Cache hierarchy: tools (cached via CHAT_TOOLS) → system → messages.
-            # Static instructions are cached; dynamic context is appended after.
-            system_blocks: list[dict[str, Any]] = [  # pyright: ignore[reportExplicitAny]
-                {
-                    "type": "text",
-                    "text": CHAT_SYSTEM_INSTRUCTIONS,
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ]
-
-            # Compact inventory context (dynamic per-request but small)
-            doc_tree = kb.get_document_tree()
-            source_stats = {s["source"]: s for s in kb.get_sources_summary()}
-            inventory = build_inventory_context(doc_tree, source_stats)
-
-            # Page context hint (small — just source/category name)
-            page_hint = ""
-            if current_doc_id:
-                page_hint = (
-                    f"The user is viewing document '{current_doc_id}'. "
-                    "Use get_document to read it if relevant."
-                )
-            elif page_context:
-                ctx_source = page_context.get("source", "")
-                ctx_category = page_context.get("category", "")
-                if ctx_source and ctx_category:
-                    page_hint = (
-                        f"The user is browsing '{ctx_category}' in '{ctx_source}'."
-                    )
-                elif ctx_source:
-                    page_hint = f"The user is browsing source '{ctx_source}'."
-
-            # Combine dynamic context into a single block
-            dynamic_parts = [inventory]
-            if page_hint:
-                dynamic_parts.append(page_hint)
-            system_blocks.append({"type": "text", "text": "\n\n".join(dynamic_parts)})
-
-            # Build messages from history + current
-            messages: list[MessageParam] = []
-            for h in history[-10:]:  # Keep last 10 exchanges
-                role = h["role"]
-                if role in ("user", "assistant"):
-                    messages.append({"role": role, "content": h["content"]})
-            messages.append({"role": "user", "content": message})
-
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                return _cors_json({"error": "ANTHROPIC_API_KEY not configured on server"}, 503)
-
-            model = os.environ.get("DOCSERVER_CHAT_MODEL", CHAT_MODEL)
-            client = anthropic.Anthropic(api_key=api_key)
-
-            response = client.messages.create(
-                model=model,
+            response = req.client.messages.create(
+                model=req.model,
                 max_tokens=CHAT_MAX_TOKENS,
-                system=system_blocks,  # type: ignore[arg-type]
-                messages=messages,
+                system=req.system_blocks,  # type: ignore[arg-type]
+                messages=req.messages,
                 tools=CHAT_TOOLS,  # type: ignore[arg-type]
             )
             _log_token_usage(response, iteration=0)
@@ -678,11 +732,8 @@ def create_mcp(config: Config) -> FastMCP:
             iterations = 0
             while response.stop_reason == "tool_use" and iterations < CHAT_MAX_TOOL_ITERATIONS:
                 iterations += 1
+                req.messages.append({"role": "assistant", "content": response.content})  # type: ignore[arg-type]
 
-                # Add assistant response (with tool_use blocks) to messages
-                messages.append({"role": "assistant", "content": response.content})  # type: ignore[arg-type]
-
-                # Execute all tool calls and collect results
                 tool_results: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
                 for block in response.content:
                     if isinstance(block, ToolUseBlock):
@@ -690,9 +741,7 @@ def create_mcp(config: Config) -> FastMCP:
                         result_text = _execute_chat_tool(kb, block.name, tool_input)
                         logger.info(
                             "Chat tool call: %s(%r) -> %d chars",
-                            block.name,
-                            tool_input,
-                            len(result_text),
+                            block.name, tool_input, len(result_text),
                             extra={"event": "chat_tool_call", "tool": block.name},
                         )
                         tool_results.append({
@@ -701,44 +750,40 @@ def create_mcp(config: Config) -> FastMCP:
                             "content": result_text,
                         })
 
-                # Guard: API requires at least one tool_result
                 if not tool_results:
                     break
 
-                # Compact older tool results to prevent token accumulation
-                messages.append({"role": "user", "content": tool_results})  # type: ignore[arg-type]
-                _compact_old_tool_results(messages)
+                req.messages.append({"role": "user", "content": tool_results})  # type: ignore[arg-type]
+                _compact_old_tool_results(req.messages)
 
-                response = client.messages.create(
-                    model=model,
+                response = req.client.messages.create(
+                    model=req.model,
                     max_tokens=CHAT_MAX_TOKENS,
-                    system=system_blocks,  # type: ignore[arg-type]
-                    messages=messages,
+                    system=req.system_blocks,  # type: ignore[arg-type]
+                    messages=req.messages,
                     tools=CHAT_TOOLS,  # type: ignore[arg-type]
                 )
                 _log_token_usage(response, iteration=iterations)
 
             # Extract final text response
-            reply_parts: list[str] = []
-            for block in response.content:
-                if isinstance(block, TextBlock):
-                    reply_parts.append(block.text)
-            reply = "\n".join(reply_parts)
+            reply = "\n".join(
+                block.text for block in response.content if isinstance(block, TextBlock)
+            )
 
-            # Persist full conversation (not truncated to the 10-message API window)
+            # Persist conversation
             conversations = _get_conversations()
             chat_messages = [
-                h for h in history if h.get("role") in ("user", "assistant")
+                h for h in req.history if h.get("role") in ("user", "assistant")
             ]
-            chat_messages.append({"role": "user", "content": message})
+            chat_messages.append({"role": "user", "content": req.user_message})
             chat_messages.append({"role": "assistant", "content": reply})
 
-            if conversation_id:
-                conversations.update(conversation_id, chat_messages, page_context)
+            if req.conversation_id:
+                conversations.update(req.conversation_id, chat_messages, req.page_context)
             else:
-                conversation_id = conversations.create(chat_messages, page_context)
+                req.conversation_id = conversations.create(chat_messages, req.page_context)
 
-            return _cors_json({"reply": reply, "conversation_id": conversation_id})
+            return _cors_json({"reply": reply, "conversation_id": req.conversation_id})
 
         except anthropic.RateLimitError:
             logger.warning("Anthropic rate limit hit in chat.", extra={"event": "chat_rate_limit"})
@@ -749,6 +794,148 @@ def create_mcp(config: Config) -> FastMCP:
         except Exception:
             logger.exception("API chat failed.")
             return _cors_json({"error": "Internal error"}, 500)
+
+    # ---- Streaming Chat (SSE) --------------------------------------------
+
+    @server.custom_route("/api/chat/stream", methods=["POST", "OPTIONS"])
+    async def api_chat_stream(request: Request) -> JSONResponse | EventSourceResponse:  # pyright: ignore[reportUnusedFunction]
+        """Streaming chat endpoint using Server-Sent Events.
+
+        Sends tool-use progress events during the agentic loop, then the
+        final reply. Same request body as /api/chat.
+        """
+        if request.method == "OPTIONS":
+            return _cors_json({})
+
+        req = await _prepare_chat_request(request)
+        if isinstance(req, JSONResponse):
+            return req
+
+        kb = _get_kb()
+
+        async def event_generator():  # noqa: C901
+            call_index = 0
+            try:
+                yield ServerSentEvent(
+                    data=json.dumps({"status": "thinking"}),
+                    event="status",
+                )
+
+                response = await asyncio.to_thread(
+                    req.client.messages.create,
+                    model=req.model,
+                    max_tokens=CHAT_MAX_TOKENS,
+                    system=req.system_blocks,  # type: ignore[arg-type]
+                    messages=req.messages,
+                    tools=CHAT_TOOLS,  # type: ignore[arg-type]
+                )
+                _log_token_usage(response, iteration=0)
+
+                iterations = 0
+                while response.stop_reason == "tool_use" and iterations < CHAT_MAX_TOOL_ITERATIONS:
+                    iterations += 1
+                    req.messages.append({"role": "assistant", "content": response.content})  # type: ignore[arg-type]
+
+                    tool_results: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
+                    for block in response.content:
+                        if isinstance(block, ToolUseBlock):
+                            tool_input = block.input if isinstance(block.input, dict) else {}
+
+                            yield ServerSentEvent(
+                                data=json.dumps({"index": call_index, "tool": block.name, "input": tool_input}),
+                                event="tool_call",
+                            )
+
+                            result_text = await asyncio.to_thread(
+                                _execute_chat_tool, kb, block.name, tool_input,
+                            )
+                            logger.info(
+                                "Chat tool call: %s(%r) -> %d chars",
+                                block.name, tool_input, len(result_text),
+                                extra={"event": "chat_tool_call", "tool": block.name},
+                            )
+                            summary = _tool_result_summary(block.name, result_text)
+
+                            yield ServerSentEvent(
+                                data=json.dumps({"index": call_index, "tool": block.name, "summary": summary}),
+                                event="tool_result",
+                            )
+                            call_index += 1
+
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result_text,
+                            })
+
+                    if not tool_results:
+                        break
+
+                    req.messages.append({"role": "user", "content": tool_results})  # type: ignore[arg-type]
+                    _compact_old_tool_results(req.messages)
+
+                    yield ServerSentEvent(
+                        data=json.dumps({"status": "thinking", "iteration": iterations}),
+                        event="status",
+                    )
+
+                    response = await asyncio.to_thread(
+                        req.client.messages.create,
+                        model=req.model,
+                        max_tokens=CHAT_MAX_TOKENS,
+                        system=req.system_blocks,  # type: ignore[arg-type]
+                        messages=req.messages,
+                        tools=CHAT_TOOLS,  # type: ignore[arg-type]
+                    )
+                    _log_token_usage(response, iteration=iterations)
+
+                # Extract final reply
+                reply = "\n".join(
+                    block.text for block in response.content if isinstance(block, TextBlock)
+                )
+
+                # Persist conversation
+                conversations = _get_conversations()
+                chat_messages = [
+                    h for h in req.history if h.get("role") in ("user", "assistant")
+                ]
+                chat_messages.append({"role": "user", "content": req.user_message})
+                chat_messages.append({"role": "assistant", "content": reply})
+
+                if req.conversation_id:
+                    conversations.update(req.conversation_id, chat_messages, req.page_context)
+                else:
+                    req.conversation_id = conversations.create(chat_messages, req.page_context)
+
+                yield ServerSentEvent(
+                    data=json.dumps({"reply": reply, "conversation_id": req.conversation_id}),
+                    event="reply",
+                )
+
+            except anthropic.RateLimitError:
+                logger.warning("Anthropic rate limit hit in chat stream.", extra={"event": "chat_rate_limit"})
+                yield ServerSentEvent(
+                    data=json.dumps({"error": "Rate limit reached — please wait a moment and try again."}),
+                    event="error",
+                )
+            except anthropic.APIError as exc:
+                logger.exception("Anthropic API error in chat stream.")
+                yield ServerSentEvent(
+                    data=json.dumps({"error": f"AI service error: {exc.message}"}),
+                    event="error",
+                )
+            except Exception:
+                logger.exception("Chat stream failed.")
+                yield ServerSentEvent(
+                    data=json.dumps({"error": "Internal error"}),
+                    event="error",
+                )
+
+        return EventSourceResponse(
+            content=event_generator(),
+            headers=_CORS_HEADERS,
+            ping=15,
+        )
 
     # ---- Conversation API ------------------------------------------------
 

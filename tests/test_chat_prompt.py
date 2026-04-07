@@ -12,6 +12,7 @@ from docserver.server import (
     _compact_old_tool_results,
     _execute_chat_tool,
     _safe_int,
+    _tool_result_summary,
     build_inventory_context,
     build_system_prompt,
 )
@@ -582,6 +583,60 @@ class TestCompactOldToolResults:
         assert "Prior result" in messages[2]["content"][1]["content"]
         # Latest intact
         assert messages[4]["content"][0]["content"] == "F" * 500
+
+
+# ---- _tool_result_summary ----------------------------------------------------
+
+
+class TestToolResultSummary:
+    """Test the human-readable tool result summary for SSE events."""
+
+    def test_search_docs_with_results(self):
+        # search_docs results are separated by double newlines
+        result = "chunk1\n\nchunk2\n\nchunk3"
+        summary = _tool_result_summary("search_docs", result)
+        assert "3 results found" in summary
+
+    def test_search_docs_single_result(self):
+        summary = _tool_result_summary("search_docs", "one result only")
+        assert "1 result found" in summary
+
+    def test_search_docs_no_results(self):
+        summary = _tool_result_summary("search_docs", "No matching documents found.")
+        assert "No results" in summary
+
+    def test_query_docs_with_results(self):
+        result = json.dumps([{"doc_id": "a"}, {"doc_id": "b"}, {"doc_id": "c"}])
+        summary = _tool_result_summary("query_docs", result)
+        assert "Found 3 documents" in summary
+
+    def test_query_docs_single_result(self):
+        result = json.dumps([{"doc_id": "a"}])
+        summary = _tool_result_summary("query_docs", result)
+        assert "Found 1 document" in summary
+
+    def test_query_docs_no_results(self):
+        summary = _tool_result_summary("query_docs", "No matching documents found.")
+        assert "No results" in summary
+
+    def test_get_document_found(self):
+        result = "x" * 2500
+        summary = _tool_result_summary("get_document", result)
+        assert "Document retrieved" in summary
+        assert "2,500" in summary
+
+    def test_get_document_not_found(self):
+        summary = _tool_result_summary("get_document", "Document 'x:y' not found.")
+        assert "No results" in summary
+
+    def test_list_sources(self):
+        result = json.dumps([{"source": "a"}, {"source": "b"}])
+        summary = _tool_result_summary("list_sources", result)
+        assert "Listed 2 sources" in summary
+
+    def test_unknown_tool(self):
+        summary = _tool_result_summary("something_else", "x" * 100)
+        assert "100" in summary
 
 
 # ---- _safe_int ---------------------------------------------------------------

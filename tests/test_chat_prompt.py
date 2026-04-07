@@ -1,14 +1,15 @@
-"""Tests for chat prompt building functions.
+"""Tests for chat prompt building functions and token-efficient tool execution.
 
-These test the pure functions that construct the system prompt for the chat
-endpoint, ensuring the agent receives the right context to answer meta
-questions about indexing status, document counts, and source inventory.
+Tests the pure functions that construct the system prompt, execute chat tools,
+and compact tool results for the agentic chat endpoint.
 """
 
+import json
 
 from docserver.server import (
     CHAT_SYSTEM_INSTRUCTIONS,
     CHAT_TOOLS,
+    _compact_old_tool_results,
     _execute_chat_tool,
     _safe_int,
     build_inventory_context,
@@ -121,18 +122,19 @@ class TestSystemInstructions:
     def test_mentions_unified_server(self):
         assert "unified documentation server" in CHAT_SYSTEM_INSTRUCTIONS
 
-    def test_mentions_structural_questions(self):
-        assert "structural questions" in CHAT_SYSTEM_INSTRUCTIONS
+    def test_mentions_structural_queries(self):
+        """Model should use query_docs for structural questions."""
+        assert "query_docs" in CHAT_SYSTEM_INSTRUCTIONS
 
-    def test_mentions_journal_dates(self):
-        assert "most recent journal entry" in CHAT_SYSTEM_INSTRUCTIONS
+    def test_concise_directive(self):
+        assert "concise and direct" in CHAT_SYSTEM_INSTRUCTIONS
 
 
 # ---- build_inventory_context -------------------------------------------------
 
 
 class TestBuildInventoryContext:
-    """Test the inventory context builder."""
+    """Test the compact inventory context builder."""
 
     def test_includes_source_count(self):
         tree = _make_tree()
@@ -154,115 +156,55 @@ class TestBuildInventoryContext:
         # 30 + 45 = 75
         assert "75 vector chunks" in result
 
-    def test_includes_per_source_stats(self):
+    def test_includes_per_source_file_count(self):
         tree = _make_tree()
         stats = _make_stats()
         result = build_inventory_context(tree, stats)
-        assert "**home-server** (10 files, 30 chunks" in result
-        assert "**timer-app** (15 files, 45 chunks" in result
+        assert "home-server: 10 files" in result
+        assert "timer-app: 15 files" in result
 
-    def test_includes_last_indexed_timestamp(self):
-        tree = _make_tree()
+    def test_includes_category_counts(self):
+        """Compact format shows category counts, not individual documents."""
+        tree = _make_tree(with_root_docs=True, with_engineering=True)
         stats = _make_stats()
         result = build_inventory_context(tree, stats)
-        assert "2026-03-28T12:00:00+00:00" in result
+        assert "2 root" in result
+        assert "2 docs" in result
+        assert "1 journal" in result
+        assert "1 engineering" in result
 
-    def test_includes_root_docs_category(self):
-        tree = _make_tree(with_root_docs=True)
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "Root docs (2)" in result
-        assert "README.md" in result
-        assert "CLAUDE.md" in result
-
-    def test_includes_documentation_category(self):
-        tree = _make_tree()
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "Documentation (2)" in result
-        assert "Setup Guide" in result
-        assert "Architecture" in result
-
-    def test_includes_journal_category(self):
-        tree = _make_tree()
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "Journal (1)" in result
-        assert "Initial commit" in result
-
-    def test_includes_engineering_team_category(self):
-        tree = _make_tree(with_engineering=True)
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "Engineering team (1)" in result
-        assert "Eval Report" in result
-
-    def test_includes_skills_category(self):
+    def test_skills_category_count(self):
         tree = _make_tree(with_skills=True)
         stats = _make_stats()
         result = build_inventory_context(tree, stats)
-        assert "Skills (2)" in result
-        assert "Weather Skill" in result
-        assert "Calendar Skill" in result
+        assert "2 skills" in result
 
-    def test_includes_runbooks_category(self):
+    def test_runbooks_category_count(self):
         tree = _make_tree(with_runbooks=True)
         stats = _make_stats()
         result = build_inventory_context(tree, stats)
-        assert "Runbooks (1)" in result
-        assert "Deploy Guide" in result
+        assert "1 runbooks" in result
 
-    def test_includes_created_at_dates(self):
+    def test_no_per_document_listings(self):
+        """Compact format must NOT list individual document titles or paths."""
         tree = _make_tree()
         stats = _make_stats()
         result = build_inventory_context(tree, stats)
-        assert "created=2025-06-15T10:00:00+00:00" in result  # Setup Guide
-        assert "created=2026-01-01T00:00:00+00:00" in result  # Initial commit
-
-    def test_includes_modified_at_dates(self):
-        tree = _make_tree()
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "modified=2026-03-01T12:00:00+00:00" in result  # Setup Guide
-
-    def test_includes_size_bytes(self):
-        tree = _make_tree()
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "size=4200b" in result  # Setup Guide
-        assert "size=8500b" in result  # Architecture
-
-    def test_includes_file_path_when_title_present(self):
-        tree = _make_tree()
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "path=docs/setup.md" in result
-        assert "path=docs/architecture.md" in result
-
-    def test_doc_without_dates_omits_date_fields(self):
-        tree = [{
-            "source": "test",
-            "root_docs": [],
-            "docs": [{"title": "No Dates", "file_path": "docs/nodates.md"}],
-            "journal": [],
-        }]
-        stats = _make_stats(sources=["test"])
-        result = build_inventory_context(tree, stats)
-        assert "No Dates" in result
+        # These are individual doc details that should NOT appear
+        assert "Setup Guide" not in result
+        assert "Architecture" not in result
+        assert "Initial commit" not in result
+        assert "README.md" not in result
         assert "created=" not in result
         assert "modified=" not in result
+        assert "size=" not in result
 
-    def test_omits_empty_root_docs(self):
-        tree = _make_tree(with_root_docs=False)
+    def test_omits_empty_categories(self):
+        tree = _make_tree(with_root_docs=False, with_engineering=False)
         stats = _make_stats()
         result = build_inventory_context(tree, stats)
-        assert "Root docs" not in result
-
-    def test_omits_empty_engineering_team(self):
-        tree = _make_tree(with_engineering=False)
-        stats = _make_stats()
-        result = build_inventory_context(tree, stats)
-        assert "Engineering team" not in result
+        assert "root" not in result
+        assert "engineering" not in result
 
     def test_missing_engineering_team_key(self):
         """Tree entries without engineering_team key should not crash."""
@@ -271,24 +213,13 @@ class TestBuildInventoryContext:
             del src["engineering_team"]
         stats = _make_stats()
         result = build_inventory_context(tree, stats)
-        assert "Engineering team" not in result
+        assert "engineering" not in result
 
-    def test_source_not_in_stats_shows_zeros(self):
+    def test_source_not_in_stats_shows_zero_files(self):
         tree = _make_tree(sources=["unknown-source"])
-        stats = {}  # No stats at all
+        stats = {}
         result = build_inventory_context(tree, stats)
-        assert "**unknown-source** (0 files, 0 chunks, last indexed: never)" in result
-
-    def test_fallback_to_file_path_when_title_is_none(self):
-        tree = [{
-            "source": "test",
-            "root_docs": [],
-            "docs": [{"title": None, "file_path": "docs/no-title.md"}],
-            "journal": [],
-        }]
-        stats = _make_stats(sources=["test"])
-        result = build_inventory_context(tree, stats)
-        assert "docs/no-title.md" in result
+        assert "unknown-source: 0 files" in result
 
     def test_empty_tree(self):
         result = build_inventory_context([], {})
@@ -301,7 +232,15 @@ class TestBuildInventoryContext:
         stats = _make_stats(sources=["solo"])
         result = build_inventory_context(tree, stats)
         assert "1 sources" in result
-        assert "**solo**" in result
+        assert "solo:" in result
+
+    def test_compact_size(self):
+        """Inventory should be much smaller than the old per-document format."""
+        tree = _make_tree(with_root_docs=True, with_engineering=True, with_skills=True, with_runbooks=True)
+        stats = _make_stats()
+        result = build_inventory_context(tree, stats)
+        # With 2 sources and all categories, should be well under 500 chars
+        assert len(result) < 500
 
 
 # ---- build_system_prompt -----------------------------------------------------
@@ -326,70 +265,50 @@ class TestBuildSystemPrompt:
 
     def test_context_parts_separated_by_hr(self):
         prompt = build_system_prompt(["AAA", "BBB"])
-        # Parts should be separated by ---
         assert "AAA\n\n---\n\nBBB" in prompt
 
     def test_instructions_separated_from_context(self):
         prompt = build_system_prompt(["Context here"])
-        # There should be a double newline between instructions and context
         idx = prompt.index("Context here")
         before = prompt[:idx]
         assert before.endswith("\n\n")
 
     def test_full_prompt_with_inventory(self):
-        """Integration: build inventory, then full prompt, verify key data present."""
+        """Integration: build inventory, then full prompt."""
         tree = _make_tree()
         stats = _make_stats()
         inventory = build_inventory_context(tree, stats)
         prompt = build_system_prompt([inventory])
 
-        # Instructions present
         assert "documentation assistant" in prompt
-        assert "Search proactively" in prompt
-
-        # Inventory data present
         assert "2 sources" in prompt
-        assert "**home-server**" in prompt
+        assert "home-server:" in prompt
         assert "10 files" in prompt
-        assert "30 chunks" in prompt
-        assert "Root docs (2)" in prompt
-        assert "Journal (1)" in prompt
 
-    def test_full_prompt_with_inventory_and_rag(self):
-        """Inventory + RAG context both appear in final prompt."""
+    def test_full_prompt_with_inventory_and_extra_context(self):
+        """Inventory + extra context both appear in final prompt."""
         tree = _make_tree(sources=["myrepo"])
         stats = _make_stats(sources=["myrepo"])
         inventory = build_inventory_context(tree, stats)
-        rag = "Relevant documentation excerpts:\n\nSome search result content here."
-        prompt = build_system_prompt([inventory, rag])
+        extra = "The user is browsing source 'myrepo'."
+        prompt = build_system_prompt([inventory, extra])
 
-        assert "**myrepo**" in prompt
-        assert "Some search result content here" in prompt
-        # Both separated by ---
+        assert "myrepo" in prompt
+        assert "browsing" in prompt
         assert "---" in prompt
 
     def test_page_context_source_only(self):
-        """Page context with source only produces correct context."""
         inventory = build_inventory_context([], {})
-        ctx = (
-            "The user is currently browsing the 'm3' source "
-            "overview page. Use your tools to look up documents in this "
-            "source if relevant to the user's question."
-        )
+        ctx = "The user is browsing source 'm3'."
         prompt = build_system_prompt([inventory, ctx])
-        assert "'m3' source" in prompt
+        assert "'m3'" in prompt
 
     def test_page_context_source_and_category(self):
-        """Page context with source and category produces correct context."""
         inventory = build_inventory_context([], {})
-        ctx = (
-            "The user is currently browsing the 'journal' category "
-            "within the 'm3' source. Use your tools to look up "
-            "documents in this source if relevant to the user's question."
-        )
+        ctx = "The user is browsing 'journal' in 'm3'."
         prompt = build_system_prompt([inventory, ctx])
-        assert "'journal' category" in prompt
-        assert "'m3' source" in prompt
+        assert "'journal'" in prompt
+        assert "'m3'" in prompt
 
 
 # ---- CHAT_TOOLS -------------------------------------------------------------
@@ -420,6 +339,12 @@ class TestChatTools:
         get_doc = next(t for t in CHAT_TOOLS if t["name"] == "get_document")
         assert "doc_id" in get_doc["input_schema"]["required"]
 
+    def test_last_tool_has_cache_control(self):
+        """Last tool should have cache_control for prompt caching."""
+        last_tool = CHAT_TOOLS[-1]
+        assert "cache_control" in last_tool
+        assert last_tool["cache_control"]["type"] == "ephemeral"
+
 
 # ---- _execute_chat_tool -----------------------------------------------------
 
@@ -448,11 +373,24 @@ class TestExecuteChatTool:
         def query_documents(self, **kwargs):
             if kwargs.get("source") == "empty":
                 return []
-            return [{"doc_id": "test:docs/test.md", "title": "Test Doc"}]
+            return [
+                {
+                    "doc_id": "test:docs/test.md",
+                    "title": "Test Doc",
+                    "source": "test-source",
+                    "file_path": "docs/test.md",
+                    "chunk_index": 0,
+                    "total_chunks": 3,
+                    "created_at": "2025-06-15",
+                    "size_bytes": 4200,
+                }
+            ]
 
         def get_document(self, doc_id: str):
             if doc_id == "missing:doc":
                 return None
+            if doc_id == "large:doc":
+                return {"doc_id": doc_id, "title": "Large", "content": "x" * 20000}
             return {"doc_id": doc_id, "title": "Found", "content": "Content here"}
 
         def get_sources_summary(self):
@@ -464,15 +402,54 @@ class TestExecuteChatTool:
         assert "Test Doc" in result
         assert "Result for: hello" in result
 
+    def test_search_docs_compact_format(self):
+        """Search results should use compact single-line headers."""
+        kb = self.MockKB()
+        result = _execute_chat_tool(kb, "search_docs", {"query": "hello"})  # type: ignore[arg-type]
+        # Compact format: [source:path] title (score:X.XX)
+        assert "[test-source:docs/test.md]" in result
+        assert "score:0.95" in result
+
+    def test_search_docs_truncates_long_content(self):
+        """Search results with long content should be truncated."""
+
+        class LongContentKB(self.MockKB):
+            def search(self, *, query: str, n_results: int, source_filter: str | None = None):
+                return [
+                    {
+                        "content": "x" * 500,
+                        "score": 0.9,
+                        "metadata": {"title": "Long", "source": "s", "file_path": "f.md"},
+                    }
+                ]
+
+        kb = LongContentKB()
+        result = _execute_chat_tool(kb, "search_docs", {"query": "test"})  # type: ignore[arg-type]
+        assert len(result) < 500
+        assert "..." in result
+
     def test_search_docs_empty(self):
         kb = self.MockKB()
         result = _execute_chat_tool(kb, "search_docs", {"query": "empty"})  # type: ignore[arg-type]
         assert "No matching documents found" in result
 
-    def test_query_docs_returns_results(self):
+    def test_query_docs_returns_compact_fields(self):
+        """query_docs should return only key fields (doc_id, title, source, file_path)."""
         kb = self.MockKB()
         result = _execute_chat_tool(kb, "query_docs", {"source": "test"})  # type: ignore[arg-type]
-        assert "Test Doc" in result
+        parsed = json.loads(result)
+        assert len(parsed) == 1
+        doc = parsed[0]
+        assert set(doc.keys()) == {"doc_id", "title", "source", "file_path"}
+        assert doc["title"] == "Test Doc"
+
+    def test_query_docs_excludes_extra_metadata(self):
+        """query_docs should NOT include chunk_index, size_bytes, dates, etc."""
+        kb = self.MockKB()
+        result = _execute_chat_tool(kb, "query_docs", {"source": "test"})  # type: ignore[arg-type]
+        assert "chunk_index" not in result
+        assert "size_bytes" not in result
+        assert "created_at" not in result
 
     def test_query_docs_empty(self):
         kb = self.MockKB()
@@ -489,6 +466,12 @@ class TestExecuteChatTool:
         kb = self.MockKB()
         result = _execute_chat_tool(kb, "get_document", {"doc_id": "missing:doc"})  # type: ignore[arg-type]
         assert "not found" in result
+
+    def test_get_document_truncates_large_docs(self):
+        kb = self.MockKB()
+        result = _execute_chat_tool(kb, "get_document", {"doc_id": "large:doc"})  # type: ignore[arg-type]
+        assert len(result) < 10000
+        assert "truncated" in result
 
     def test_list_sources(self):
         kb = self.MockKB()
@@ -512,6 +495,93 @@ class TestExecuteChatTool:
         kb = self.MockKB()
         result = _execute_chat_tool(kb, "query_docs", {"source": "test", "limit": None})  # type: ignore[arg-type]
         assert "Test Doc" in result
+
+
+# ---- _compact_old_tool_results -----------------------------------------------
+
+
+class TestCompactOldToolResults:
+    """Test the tool result compaction for the agentic loop."""
+
+    def test_no_tool_results_is_noop(self):
+        messages: list[dict] = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+        _compact_old_tool_results(messages)  # type: ignore[arg-type]
+        assert messages[0]["content"] == "Hello"
+
+    def test_single_tool_result_not_compacted(self):
+        """The most recent (only) tool result should not be compacted."""
+        messages: list[dict] = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "tool_use response"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "1", "content": "A" * 500},
+            ]},
+        ]
+        _compact_old_tool_results(messages)  # type: ignore[arg-type]
+        assert messages[2]["content"][0]["content"] == "A" * 500
+
+    def test_older_tool_results_compacted(self):
+        """Older tool results should be replaced with short summaries."""
+        messages: list[dict] = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "tool_use 1"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "1", "content": "B" * 500},
+            ]},
+            {"role": "assistant", "content": "tool_use 2"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "2", "content": "C" * 500},
+            ]},
+        ]
+        _compact_old_tool_results(messages)  # type: ignore[arg-type]
+        # First tool result (older) should be compacted
+        first_result = messages[2]["content"][0]["content"]
+        assert "Prior result" in first_result
+        assert len(first_result) < 100
+        # Latest tool result should remain intact
+        latest_result = messages[4]["content"][0]["content"]
+        assert latest_result == "C" * 500
+
+    def test_short_results_not_compacted(self):
+        """Short tool results below the threshold should remain intact."""
+        messages: list[dict] = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "tool_use 1"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "1", "content": "short"},
+            ]},
+            {"role": "assistant", "content": "tool_use 2"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "2", "content": "also short"},
+            ]},
+        ]
+        _compact_old_tool_results(messages)  # type: ignore[arg-type]
+        # Short result should stay
+        assert messages[2]["content"][0]["content"] == "short"
+
+    def test_multiple_tool_results_in_one_message(self):
+        """Multiple tool results in a single message should all be compacted if old."""
+        messages: list[dict] = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "tool_use batch"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "1", "content": "D" * 500},
+                {"type": "tool_result", "tool_use_id": "2", "content": "E" * 300},
+            ]},
+            {"role": "assistant", "content": "tool_use 3"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "3", "content": "F" * 500},
+            ]},
+        ]
+        _compact_old_tool_results(messages)  # type: ignore[arg-type]
+        # Both older results compacted
+        assert "Prior result" in messages[2]["content"][0]["content"]
+        assert "Prior result" in messages[2]["content"][1]["content"]
+        # Latest intact
+        assert messages[4]["content"][0]["content"] == "F" * 500
 
 
 # ---- _safe_int ---------------------------------------------------------------

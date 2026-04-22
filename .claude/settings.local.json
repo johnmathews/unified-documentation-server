@@ -42,7 +42,8 @@
       "Bash(git branch:*)"
     ],
     "additionalDirectories": [
-      "/Users/john/projects/home-server/documentation-ui"
+      "/Users/john/projects/home-server/documentation-ui",
+      "/Users/john/projects/home-server/documentation-webapp"
     ]
   }
 }

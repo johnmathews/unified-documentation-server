@@ -20,3 +20,4 @@ credentials.json
 .engineering-team/
 .playwright-mcp/
 local-data/
+node_modules/

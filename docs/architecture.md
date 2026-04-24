@@ -119,7 +119,7 @@ Parent docs (non-chunks) are returned by `query_documents()` so results represen
 
 ### ChromaDB (`/data/chroma/`)
 
-Stores chunk text with vector embeddings for semantic similarity search. Uses the **all-mpnet-base-v2** embedding model via ONNX Runtime (768 dimensions, ~500MB RAM, runs locally with no external API calls). ONNX Runtime was chosen over PyTorch-based sentence-transformers to keep Docker images small (~1GB vs ~8GB) and build times fast.
+Stores chunk text with vector embeddings for semantic similarity search. Uses the **all-mpnet-base-v2** embedding model via ONNX Runtime (768 dimensions, ~500MB RAM, runs locally with no external API calls). ONNX Runtime was chosen over PyTorch-based sentence-transformers to keep Docker images small (~650MB vs ~8GB) and build times fast. The Dockerfile uses a multi-stage build: the builder stage installs dependencies and downloads the model, then the final stage copies the result with `--chown` to avoid layer duplication. Unused onnxruntime transitive dependencies (sympy, mpmath) are stripped in the builder stage.
 
 Only chunks are stored in ChromaDB. Parent docs are excluded since they have no content body. Each chunk's metadata in ChromaDB includes `source`, `file_path`, `title`, `chunk_index`, `total_chunks`, and `section_path` for filtering.
 

@@ -87,6 +87,53 @@ class TestChromaDBInterface:
         ef.validate_config_update({}, {"model_dir": "/tmp/new"})
 
 
+class TestUnload:
+    """Test lazy unloading and transparent reload of the embedding model."""
+
+    def test_unload_returns_true_when_loaded(self, ef: OnnxEmbeddingFunction) -> None:
+        """unload() should return True when session/tokenizer were cached."""
+        # Ensure model is loaded by running an embedding
+        ef(["trigger load"])
+        assert "_session" in ef.__dict__
+        assert "_tokenizer" in ef.__dict__
+        assert ef.unload() is True
+
+    def test_unload_returns_false_when_not_loaded(self) -> None:
+        """unload() should return False on a fresh instance (nothing cached)."""
+        func = OnnxEmbeddingFunction()
+        assert func.unload() is False
+
+    def test_unload_evicts_cached_properties(self, ef: OnnxEmbeddingFunction) -> None:
+        """After unload, _session and _tokenizer should not be in __dict__."""
+        ef(["trigger load"])
+        ef.unload()
+        assert "_session" not in ef.__dict__
+        assert "_tokenizer" not in ef.__dict__
+
+    def test_reload_after_unload_produces_correct_embeddings(
+        self, ef: OnnxEmbeddingFunction
+    ) -> None:
+        """After unload, the next __call__ should transparently reload and work."""
+        before = ef(["hello world"])
+        ef.unload()
+        after = ef(["hello world"])
+        # Embeddings should be identical (deterministic model)
+        np.testing.assert_allclose(before[0], after[0], atol=1e-6)
+
+    def test_unload_is_idempotent(self, ef: OnnxEmbeddingFunction) -> None:
+        """Calling unload() twice should be safe — second call returns False."""
+        ef(["trigger load"])
+        assert ef.unload() is True
+        assert ef.unload() is False
+
+    def test_unload_logs_event(self, ef: OnnxEmbeddingFunction, caplog: pytest.LogCaptureFixture) -> None:
+        """unload() should log when it actually unloads."""
+        ef(["trigger load"])
+        with caplog.at_level("INFO", logger="docserver.embedding"):
+            ef.unload()
+        assert any("model_unloaded" in r.message or "unloaded" in r.message for r in caplog.records)
+
+
 class TestModelDownload:
     """Test model download and initialization logic."""
 

@@ -133,6 +133,14 @@ class KnowledgeBase:
             extra={"event": "kb_init"},
         )
 
+    def unload_embedding_model(self) -> bool:
+        """Unload the embedding model to reclaim memory.
+
+        The model will be transparently reloaded on the next search or upsert.
+        Returns True if the model was actually unloaded.
+        """
+        return self._embedding_fn.unload()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

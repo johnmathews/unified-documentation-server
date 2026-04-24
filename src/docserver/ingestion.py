@@ -1637,6 +1637,7 @@ class Ingester:
         except Exception:
             logger.exception("Unhandled error in ingestion cycle.")
         finally:
+            self.kb.unload_embedding_model()
             stats = reclaim_memory()
             logger.info(
                 "Memory reclaim: rss %.1f MB -> %.1f MB (freed %.1f MB, gc=%d, trim=%s)",

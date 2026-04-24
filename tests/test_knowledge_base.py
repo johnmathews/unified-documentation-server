@@ -1,5 +1,7 @@
 """Tests for the knowledge base module."""
 
+from unittest.mock import patch
+
 import pytest
 
 from docserver.knowledge_base import KnowledgeBase
@@ -907,3 +909,11 @@ def test_get_source_statuses_multiple_sources(kb):
     assert len(statuses) == 2
     assert statuses["src-a"]["consecutive_failures"] == 0
     assert statuses["src-b"]["consecutive_failures"] == 1
+
+
+def test_unload_embedding_model_delegates_to_ef(kb):
+    """unload_embedding_model should delegate to the embedding function's unload()."""
+    with patch.object(kb._embedding_fn, "unload", return_value=True) as mock:
+        result = kb.unload_embedding_model()
+    mock.assert_called_once()
+    assert result is True

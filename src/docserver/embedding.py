@@ -130,6 +130,28 @@ class OnnxEmbeddingFunction(EmbeddingFunction[Documents]):
         )
         self._model_ready = True
 
+    def unload(self) -> bool:
+        """Evict the ONNX session and tokenizer from memory.
+
+        Because ``_session`` and ``_tokenizer`` are :func:`functools.cached_property`
+        descriptors, deleting them from ``__dict__`` is sufficient — they will be
+        transparently recreated on the next ``__call__``.
+
+        Returns ``True`` if anything was actually unloaded, ``False`` if the model
+        was not loaded.
+        """
+        unloaded = False
+        for attr in ("_session", "_tokenizer"):
+            if attr in self.__dict__:
+                del self.__dict__[attr]
+                unloaded = True
+        if unloaded:
+            logger.info(
+                "Embedding model unloaded from memory",
+                extra={"event": "model_unloaded"},
+            )
+        return unloaded
+
     @cached_property
     def _tokenizer(self) -> Any:
         tokenizer = self._Tokenizer.from_file(str(self._model_dir / "tokenizer.json"))

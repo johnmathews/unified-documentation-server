@@ -132,7 +132,7 @@ class BookmarkStore:
         with self._connect() as conn:
             placeholders = ",".join("?" for _ in doc_ids)
             rows = conn.execute(
-                f"SELECT doc_id FROM bookmarks WHERE user_id = ? AND doc_id IN ({placeholders})",  # noqa: S608
+                f"SELECT doc_id FROM bookmarks WHERE user_id = ? AND doc_id IN ({placeholders})",
                 [user_id, *doc_ids],
             ).fetchall()
         bookmarked = {row["doc_id"] for row in rows}

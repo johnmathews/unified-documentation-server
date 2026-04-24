@@ -22,8 +22,8 @@ from mcp.server.fastmcp import FastMCP
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 from starlette.responses import FileResponse, JSONResponse
 
-from docserver.config import Config, load_config
 from docserver.bookmarks import BookmarkStore
+from docserver.config import Config, load_config
 from docserver.conversations import ConversationStore
 
 if TYPE_CHECKING:

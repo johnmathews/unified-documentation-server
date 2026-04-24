@@ -338,6 +338,7 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 | `DOCSERVER_PORT` | `8080` | Server listen port (inside the container). Map to a host port in `docker-compose.yml`. |
 | `DOCSERVER_LOG_FORMAT` | `json` | Log output format: `json` for structured Docker log collection, `text` for human-readable local development. |
 | `DOCSERVER_LOG_LEVEL` | `INFO` | Python log level. Set to `DEBUG` for verbose ingestion diagnostics, `WARNING` to reduce noise. |
+| `DOCSERVER_CHAT_MODEL` | `claude-opus-4-latest` | Anthropic model ID for the chat agent. Uses the latest Opus 4 release by default. Override to pin a specific version (e.g. `claude-opus-4-20250514`) or switch to a cheaper model (e.g. `claude-sonnet-4-latest`). |
 
 Changes to environment variables require a container restart to take effect.
 

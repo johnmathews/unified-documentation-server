@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
@@ -40,7 +41,7 @@ Scalar = str | int | float | bool | None
 logger = logging.getLogger(__name__)
 
 
-CHAT_MODEL = "claude-sonnet-4-20250514"
+CHAT_MODEL = "claude-opus-4-latest"
 CHAT_MAX_TOKENS = 2048
 
 # ---- Chat prompt building (pure functions, testable) -------------------------
@@ -429,10 +430,11 @@ async def _prepare_chat_request(request: Request) -> _ChatRequest | JSONResponse
     conversation_id: str | None = body.get("conversation_id")  # pyright: ignore[reportAny]
 
     # Build system prompt as content blocks for caching
+    current_date = datetime.now(UTC).strftime("%Y-%m-%d")
     system_blocks: list[dict[str, Any]] = [  # pyright: ignore[reportExplicitAny]
         {
             "type": "text",
-            "text": CHAT_SYSTEM_INSTRUCTIONS,
+            "text": f"Today's date is {current_date} (UTC).\n\n{CHAT_SYSTEM_INSTRUCTIONS}",
             "cache_control": {"type": "ephemeral"},
         },
     ]

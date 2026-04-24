@@ -6,6 +6,7 @@ error handling (rate limits, API errors), and structured logging.
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
@@ -469,3 +470,25 @@ class TestConversationEndpoints:
         # Verify deleted
         list_resp2 = client.get("/api/conversations")
         assert list_resp2.json() == []
+
+
+class TestSystemPromptDate:
+    """Verify the system prompt includes the current UTC date."""
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    def test_system_prompt_contains_utc_date(self, client):
+        """The first system block should start with today's UTC date."""
+        patcher, mock_client = _patch_anthropic([
+            _FakeResponse(content=[_make_text_block("Hi")]),
+        ])
+        with patcher:
+            client.post(
+                "/api/chat",
+                json={"message": "hello"},
+                headers={"Content-Type": "application/json"},
+            )
+
+        call_kwargs = mock_client.messages.create.call_args
+        system_blocks = call_kwargs.kwargs.get("system") or call_kwargs[1].get("system")
+        first_text = system_blocks[0]["text"]
+        assert re.match(r"Today's date is \d{4}-\d{2}-\d{2} \(UTC\)\.", first_text)

@@ -41,7 +41,7 @@ Scalar = str | int | float | bool | None
 logger = logging.getLogger(__name__)
 
 
-CHAT_MODEL = "claude-opus-4-latest"
+CHAT_MODEL = "claude-opus-4-7"
 CHAT_MAX_TOKENS = 2048
 
 # ---- Chat prompt building (pure functions, testable) -------------------------

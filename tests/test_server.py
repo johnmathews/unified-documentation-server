@@ -219,12 +219,13 @@ class TestHealthEndpoint:
             assert "consecutive_failures" in src
 
     def test_health_last_ingestion_after_cycle(self, app) -> None:
-        """/health should expose the most recent ingestion cycle metrics."""
+        """/health should expose the most recent ingestion cycle metrics
+        from the supervisor."""
         starlette_app = app.streamable_http_app()
         client = TestClient(starlette_app)
 
-        ingester = server_module._get_ingester()
-        ingester._last_ingestion = {
+        supervisor = server_module._get_supervisor()
+        supervisor._last_ingestion = {
             "completed_at": "2026-04-29T12:00:00+00:00",
             "duration_s": 4.2,
             "rss_at_start_mb": 180.0,
@@ -242,6 +243,25 @@ class TestHealthEndpoint:
         assert body["last_ingestion"]["duration_s"] == 4.2
         assert body["last_ingestion"]["rss_at_end_mb"] == 240.0
         assert body["last_ingestion"]["flush_count"] == 3
+        # last_ingestion_failure should be None on success.
+        assert body["last_ingestion_failure"] is None
+
+    def test_health_last_ingestion_failure(self, app) -> None:
+        """/health surfaces last_ingestion_failure when the supervisor records one."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        supervisor = server_module._get_supervisor()
+        supervisor._last_failure = {
+            "completed_at": "2026-04-29T12:00:00+00:00",
+            "exit_code": "1",
+            "reason": "worker exited non-zero",
+        }
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["last_ingestion_failure"]["exit_code"] == "1"
 
     def test_health_reflects_chat_model_invalid(self, app) -> None:
         """/health should expose chat_model_valid=False when probe failed."""

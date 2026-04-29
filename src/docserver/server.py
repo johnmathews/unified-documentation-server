@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from starlette.requests import Request
 from docserver.ingestion import Ingester
+from docserver.ingestion_supervisor import IngesterSupervisor
 from docserver.knowledge_base import KnowledgeBase, SourceStatus, SourceSummary
 from docserver.logging_config import setup_logging
 
@@ -390,6 +391,7 @@ def _log_token_usage(response: Any, *, iteration: int) -> None:  # pyright: igno
 # Module-level references, initialized by init_app() or run_server().
 _kb: KnowledgeBase | None = None
 _ingester: Ingester | None = None
+_supervisor: IngesterSupervisor | None = None
 _config: Config | None = None
 _conversations: ConversationStore | None = None
 _bookmarks: BookmarkStore | None = None
@@ -432,6 +434,11 @@ def _get_kb() -> KnowledgeBase:
 def _get_ingester() -> Ingester:
     assert _ingester is not None, "Server not initialized — call init_app() first"
     return _ingester
+
+
+def _get_supervisor() -> IngesterSupervisor:
+    assert _supervisor is not None, "Server not initialized — call init_app() first"
+    return _supervisor
 
 
 def _get_conversations() -> ConversationStore:
@@ -693,7 +700,8 @@ def create_mcp(config: Config) -> FastMCP:
                     "total_chunks": sum(s.get("chunk_count", 0) for s in summary),
                     "poll_interval_seconds": poll_interval,
                     "sources": sources_out,
-                    "last_ingestion": ingester._last_ingestion,
+                    "last_ingestion": _get_supervisor().last_ingestion,
+                    "last_ingestion_failure": _get_supervisor().last_failure,
                     "chat_model_valid": _chat_model_valid,
                     "chat_model_error": _chat_model_error,
                 }
@@ -1523,7 +1531,7 @@ def init_app(config: Config | None = None) -> FastMCP:
 
     Useful for testing — pass a custom Config to avoid touching real state.
     """
-    global _kb, _ingester, _config, _conversations, _bookmarks
+    global _kb, _ingester, _supervisor, _config, _conversations, _bookmarks
 
     if config is None:
         config = load_config()
@@ -1535,6 +1543,7 @@ def init_app(config: Config | None = None) -> FastMCP:
         chroma_port=config.chroma_port,
     )
     _ingester = Ingester(config, _kb)
+    _supervisor = IngesterSupervisor(config)
     _conversations = ConversationStore(config.data_dir)
     _bookmarks = BookmarkStore(config.data_dir)
 
@@ -1632,10 +1641,13 @@ def run_server() -> None:
         )
         sys.exit(1)
 
-    ingester.start()
+    assert _supervisor is not None
+    supervisor = _supervisor
+    supervisor.start()
 
     try:
         mcp.run(transport="streamable-http")
     finally:
-        ingester.stop()
+        supervisor.stop()
+        ingester.stop()  # no-op if Ingester.start() was never called
         kb.close()

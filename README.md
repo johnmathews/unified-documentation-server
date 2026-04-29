@@ -9,17 +9,34 @@ containerized service on a home server, providing documentation context to agent
 Git Repos (local/remote)
         |
         v
-  [Ingestion Layer]     Polls repos every 5 min, parses markdown, chunks text
+  [Ingestion Worker]    Subprocess spawned per cycle (~5 min), parses markdown,
+        |               chunks text, embeds; exits and releases RSS to the OS
         |
         v
-  [Knowledge Base]      SQLite (metadata) + ChromaDB (vector embeddings)
+  [Knowledge Base]      SQLite (WAL mode) for metadata
+        |               ChromaDB sidecar (HTTP) for vector embeddings
         |
         v
-  [MCP Server]          FastMCP with streamable HTTP transport
+  [MCP Server]          FastMCP with streamable HTTP transport. Long-running,
+        |               isolated from ingestion's memory + GIL pressure.
         |
         v
   AI Agent (nanoclaw)   Queries docs via MCP tools
 ```
+
+### Docker Compose services
+
+`docker compose up -d` brings up three containers:
+
+| Service                | Image                                         | Purpose                                                                                     |
+| ---------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `chroma`               | `chromadb/chroma:1.5.8`                       | Owns `/chroma-data` exclusively. Serves vector queries on port 8000 over HTTP.              |
+| `docserver`            | `ghcr.io/johnmathews/unified-documentation-server:latest` | The MCP server. Connects to `chroma` via `HttpClient`. Spawns the ingestion worker per tick. |
+| `documentation-webapp` | `ghcr.io/johnmathews/unified-documentation-webapp:latest` | Optional web UI. Waits for `docserver` to become `healthy` before starting.                 |
+
+The chroma sidecar is required, not optional: `chromadb >= 1.5.x` corrupts its store when two `PersistentClient`
+instances open the same on-disk path, so the long-running server and the per-cycle ingestion worker need a single
+process owning the database. The HTTP server fills that role.
 
 ## MCP Tools
 
@@ -68,21 +85,48 @@ Trigger an immediate re-indexing of documentation sources.
 
 ## Health Endpoint
 
-`GET /health` returns the current status of the knowledge base.
+`GET /health` returns the current status of the knowledge base, the most recent ingestion cycle, and the chat model
+configuration.
 
-**200 OK** -- knowledge base is available:
+**200 OK** — server is reachable. The body is a structured snapshot:
 
 ```json
-{"status": "ok", "sources": 3, "total_chunks": 542}
+{
+  "status": "healthy",
+  "total_sources": 3,
+  "total_chunks": 542,
+  "poll_interval_seconds": 300,
+  "sources": [ /* per-source health */ ],
+  "last_ingestion": {
+    "completed_at": "2026-04-29T17:25:00+00:00",
+    "duration_s": 4.2,
+    "rss_at_end_mb": 240.0,
+    "flush_count": 3
+  },
+  "last_ingestion_failure": null,
+  "chat_model_valid": true,
+  "chat_model_error": null
+}
 ```
 
-**503 Service Unavailable** -- knowledge base is unreachable or errored:
+Notable fields:
+
+- `last_ingestion` — duration and peak-RSS metrics from the most recent worker cycle. Populated only after the first
+  cycle has run; null on a freshly started container.
+- `last_ingestion_failure` — set when the most recent worker subprocess exited non-zero, timed out, or did not emit a
+  metrics line. Useful for spotting silent ingestion stalls without scraping logs.
+- `chat_model_valid` / `chat_model_error` — set by a startup probe that calls `models.retrieve(DOCSERVER_CHAT_MODEL)`
+  on the Anthropic API. When false, `/api/chat` and `/api/chat/stream` short-circuit with HTTP 503 instead of letting
+  every request fail at the API call.
+
+**503 Service Unavailable** — knowledge base is unreachable or errored:
 
 ```json
 {"status": "error"}
 ```
 
-This endpoint is used by the Docker health check configured in `docker-compose.yml`.
+This endpoint is used by the Docker health check configured in `docker-compose.yml` and by the webapp's
+`depends_on: condition: service_healthy` gate.
 
 ## Quick Start
 
@@ -138,15 +182,22 @@ data_dir: "/data" # Persistent storage path
 
 ### Environment Variables
 
-| Variable                  | Default                | Description                  |
-| ------------------------- | ---------------------- | ---------------------------- |
-| `DOCSERVER_CONFIG`        | `/config/sources.yaml` | Path to config file          |
-| `DOCSERVER_DATA_DIR`      | `/data`                | Persistent storage directory |
-| `DOCSERVER_POLL_INTERVAL` | `300`                  | Polling interval in seconds  |
-| `DOCSERVER_HOST`          | `0.0.0.0`              | Server bind address          |
-| `DOCSERVER_PORT`          | `8080`                 | Server port                  |
-| `DOCSERVER_LOG_FORMAT`    | `json`                 | Log format (`json` or `text`) |
-| `DOCSERVER_LOG_LEVEL`     | `INFO`                 | Log level                    |
+| Variable                          | Default                | Description                                                                                        |
+| --------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------- |
+| `DOCSERVER_CONFIG`                | `/config/sources.yaml` | Path to config file                                                                                |
+| `DOCSERVER_DATA_DIR`              | `/data`                | Persistent storage directory                                                                       |
+| `DOCSERVER_POLL_INTERVAL`         | `300`                  | Polling interval in seconds                                                                        |
+| `DOCSERVER_HOST`                  | `0.0.0.0`              | Server bind address                                                                                |
+| `DOCSERVER_PORT`                  | `8080`                 | Server port                                                                                        |
+| `DOCSERVER_LOG_FORMAT`            | `json`                 | Log format (`json` or `text`)                                                                      |
+| `DOCSERVER_LOG_LEVEL`             | `INFO`                 | Log level                                                                                          |
+| `DOCSERVER_CHAT_MODEL`            | `claude-opus-4-7`      | Anthropic model ID for the chat agent. Use a version-aliased ID; Anthropic does not publish a `-latest` alias for Opus 4. |
+| `DOCSERVER_CHROMA_HOST`           | unset (compose: `chroma`) | Hostname of the Chroma sidecar. **Required in production**; tests fall back to `PersistentClient` when unset. |
+| `DOCSERVER_CHROMA_PORT`           | `8000`                 | Port the Chroma sidecar listens on.                                                                |
+| `DOCSERVER_INGEST_NICE`           | `10` (set by supervisor) | Nice offset applied to each ingestion worker subprocess. Lower priority than the docserver process. |
+| `DOCSERVER_INGEST_MEM_LIMIT_MB`   | unset (compose: `400`) | Soft + hard `RLIMIT_AS` ceiling on the worker, in MiB. Lower than the container `mem_limit` so the worker is killed first under memory pressure. |
+
+See `docs/operations.md` for the full table including all options.
 
 ## Development
 
@@ -157,16 +208,24 @@ uv run pytest tests/ -v
 
 ## How It Works
 
-1. **Ingestion**: The server polls configured git repos on a schedule. For remote repos, it clones them on first run then
-   pulls updates. For local repos (mounted as volumes), it pulls if they have a remote, or just reads the files directly.
+1. **Ingestion runs as a separate process.** An `IngesterSupervisor` in the docserver process owns an APScheduler timer.
+   On each tick (and on every `POST /rescan`), it spawns `python -m docserver.ingestion_worker` as a subprocess. The
+   worker loads the embedding model, runs one cycle, and exits — its peak RSS is fully released to the OS, so the
+   long-running docserver process stays at its small steady-state working set even when a cycle peaks high. If the
+   worker OOMs or crashes, the docserver keeps serving requests; only the cycle is lost.
 
-2. **Parsing**: Markdown files are parsed to extract titles (first `#` heading), creation dates (from git history), and
-   modification times. Documents are split into ~400-character chunks at section and paragraph boundaries, with each chunk
-   prefixed by its heading hierarchy (e.g. `[Setup > Ports]`) and ~100 chars of overlap between chunks. Lists and code
-   fences are kept intact.
+2. **Sync.** The worker polls configured git repos. For remote repos, it clones on first run then pulls updates. For
+   local repos (mounted as volumes), it pulls if they have a remote, or just reads the files directly.
 
-3. **Storage**: Parent document metadata goes into SQLite for structured queries. Document chunks are embedded and stored
-   in ChromaDB for semantic search.
+3. **Parsing.** Markdown files are parsed to extract titles (first `#` heading), creation dates (from git history), and
+   modification times. Documents are split into ~400-character chunks at section and paragraph boundaries, with each
+   chunk prefixed by its heading hierarchy (e.g. `[Setup > Ports]`) and ~100 chars of overlap between chunks. Lists and
+   code fences are kept intact.
 
-4. **Serving**: The FastMCP server exposes tools over streamable HTTP. Agents can search semantically, query by metadata,
-   or retrieve specific documents. A `/health` endpoint returns indexing status for container orchestration.
+4. **Storage.** Parent document metadata goes into SQLite (in WAL mode so the docserver can read while the worker
+   writes). Document chunks are embedded client-side via ONNX Runtime and stored in the ChromaDB sidecar service for
+   semantic search; only pre-computed vectors cross the wire, so the sidecar stays small (~256 MB).
+
+5. **Serving.** The FastMCP server exposes tools over streamable HTTP. Agents can search semantically, query by
+   metadata, or retrieve specific documents. A `/health` endpoint returns indexing status (including the most recent
+   worker cycle's RSS / duration) for container orchestration and operator visibility.

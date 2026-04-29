@@ -917,3 +917,13 @@ def test_unload_embedding_model_delegates_to_ef(kb):
         result = kb.unload_embedding_model()
     mock.assert_called_once()
     assert result is True
+
+
+def test_sqlite_journal_mode_is_wal(kb):
+    """documents.db must be in WAL mode so the ingestion worker can write while the server reads."""
+    import sqlite3 as _sqlite3
+
+    with _sqlite3.connect(kb._db_path) as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    # SQLite reports the resolved mode as a lowercase string.
+    assert mode.lower() == "wal", f"expected wal, got {mode!r}"

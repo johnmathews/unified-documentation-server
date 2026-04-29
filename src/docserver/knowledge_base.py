@@ -147,8 +147,24 @@ class KnowledgeBase:
 
     def _init_sqlite(self) -> None:
         with sqlite3.connect(self._db_path) as conn:
+            # WAL mode lets the ingestion worker write to documents.db while
+            # the server reads from it concurrently. This is a per-database
+            # persistent setting (stored in the file header) so it survives
+            # restarts and only needs to be set once, but setting it on every
+            # init is idempotent and cheap.
+            _ = conn.execute("PRAGMA journal_mode=WAL")
+            _ = conn.execute("PRAGMA synchronous=NORMAL")
             _ = conn.executescript(_SCHEMA)
             self._run_migrations(conn)
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        # Re-assert busy timeout per connection — WAL still serialises writers,
+        # so a 5s wait gives concurrent transactions room before we surface
+        # SQLITE_BUSY to the caller.
+        _ = conn.execute("PRAGMA busy_timeout=5000")
+        return conn
 
     @staticmethod
     def _run_migrations(conn: sqlite3.Connection) -> None:
@@ -156,11 +172,6 @@ class KnowledgeBase:
         for sql in _MIGRATIONS:
             with contextlib.suppress(sqlite3.OperationalError):
                 _ = conn.execute(sql)
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
 
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
         """Execute a query and return all rows as sqlite3.Row objects."""

@@ -49,12 +49,19 @@ services:
     ports:
       - "8085:8080"
     volumes:
-      # Persistent data (SQLite + ChromaDB + git clones)
+      # Persistent data (SQLite + git clones + cached ONNX model). Chroma
+      # vectors live in the chroma-data volume mounted on the chroma
+      # service above.
       - docserver-data:/data
-      # Configuration
+      # Configuration. Edit config/sources.yaml on the host (start from
+      # config/sources.example.yaml).
       - ./config/sources.yaml:/config/sources.yaml:ro
-      # Home server docs (mkdocs source on infra VM)
-      - /srv/infra/mkdocs/docs:/repos/home-server-docs:ro
+      # Optional: bind-mount a host directory you want indexed as a local
+      # source. Add a matching entry under `sources:` in
+      # config/sources.yaml whose `path:` is the container-side path
+      # (e.g. /repos/my-docs). Uncomment + adjust on the host that
+      # actually has the directory.
+      # - /srv/infra/mkdocs/docs:/repos/home-server-docs:ro
     environment:
       # How often (seconds) the server checks sources for new/changed docs.
       # Each cycle: git fetch for remote repos, content-hash check for local dirs.

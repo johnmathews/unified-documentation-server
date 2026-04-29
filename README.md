@@ -151,14 +151,18 @@ search and metadata MCP tools work without an Anthropic key.
 
 ### 3. Run with Docker Compose
 
+`docker-compose.yml` is the canonical deploy file and it works out of the box: it brings up the three services with
+named volumes only, no host-specific bind mounts. If you want to index a directory that lives on the host filesystem,
+uncomment the example bind-mount stanza in the `docserver` service's `volumes:` block and add a matching `sources:`
+entry in `config/sources.yaml` whose `path:` points at the container-side mount.
+
 ```bash
-# Add volume mounts for local repos in docker-compose.yml first, then:
 docker compose up -d
 ```
 
-This brings up three containers — `chroma`, `docserver`, and `documentation-webapp` — and three named volumes
-(`chroma-data`, `docserver-data`, plus the implicit anonymous volumes the images create). The webapp waits for the
-docserver's `/health` to be green before starting; the docserver waits for the chroma sidecar to be reachable.
+This brings up three containers — `chroma`, `docserver`, and `documentation-webapp` — and two named volumes
+(`chroma-data`, `docserver-data`). The webapp waits for the docserver's `/health` to be green before starting; the
+docserver waits for the chroma sidecar to be reachable.
 
 Host ports (per `docker-compose.yml`):
 

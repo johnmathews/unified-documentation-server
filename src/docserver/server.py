@@ -32,7 +32,11 @@ if TYPE_CHECKING:
 
     from starlette.requests import Request
 from docserver.ingestion import Ingester
-from docserver.ingestion_supervisor import IngesterSupervisor
+from docserver.ingestion_supervisor import (
+    IngesterSupervisor,
+    IngestionAlreadyRunning,
+    IngestionTimeout,
+)
 from docserver.knowledge_base import KnowledgeBase, SourceStatus, SourceSummary
 from docserver.logging_config import setup_logging
 
@@ -712,43 +716,63 @@ def create_mcp(config: Config) -> FastMCP:
 
     # ---- Rescan endpoint ------------------------------------------------
 
-    _rescan_lock = threading.Lock()
-    _rescan_running = False
-
     @server.custom_route("/rescan", methods=["POST"])
     async def rescan(request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
-        """Trigger a background ingestion cycle. Optionally pass ?source=name&force=true."""
-        nonlocal _rescan_running
-        try:
-            if _rescan_running:
-                return JSONResponse({"status": "already_running"}, status_code=409)
+        """Trigger an out-of-band ingestion cycle via the supervisor.
 
-            ingester = _get_ingester()
+        Optional query params: ``?source=name&force=true``.
+
+        Concurrency is owned by the supervisor — only one cycle runs at a
+        time, and it does not matter whether the cycle was triggered by
+        the scheduler or by this endpoint. A second /rescan during an
+        in-flight cycle returns 409.
+        """
+        try:
+            supervisor = _get_supervisor()
             source = request.query_params.get("source", "")
             force = request.query_params.get("force", "").lower() == "true"
             sources = [source] if source else None
 
             def _run_rescan() -> None:
-                nonlocal _rescan_running
                 try:
                     t0 = time.monotonic()
-                    stats = ingester.run_once(sources=sources, force=force)
+                    metrics = supervisor.run_subprocess_cycle(sources=sources, force=force)
                     duration_ms = int((time.monotonic() - t0) * 1000)
                     logger.info(
-                        "Rescan completed in %dms: %s",
+                        "Rescan completed in %dms: metrics=%s",
                         duration_ms,
-                        stats,
-                        extra={"event": "rescan", "duration_ms": duration_ms, "stats": stats},
+                        metrics,
+                        extra={
+                            "event": "rescan",
+                            "duration_ms": duration_ms,
+                            "metrics": metrics,
+                        },
+                    )
+                except IngestionAlreadyRunning:
+                    # Another cycle (scheduler or earlier rescan) raced with
+                    # us between the pre-check below and the subprocess
+                    # spawn; nothing to do.
+                    logger.info(
+                        "Rescan skipped: supervisor reports another cycle in flight.",
+                        extra={"event": "rescan_skipped_overlap"},
+                    )
+                except IngestionTimeout as exc:
+                    logger.error(
+                        "Rescan worker timed out: %s",
+                        exc,
+                        extra={"event": "rescan_timeout"},
                     )
                 except Exception:
                     logger.exception("Rescan failed.")
-                finally:
-                    _rescan_running = False
 
-            with _rescan_lock:
-                if _rescan_running:
-                    return JSONResponse({"status": "already_running"}, status_code=409)
-                _rescan_running = True
+            # Cheap pre-check so we can return 409 synchronously when a cycle
+            # is obviously already running. The supervisor enforces the
+            # invariant authoritatively inside _spawn_and_stream.
+            if (
+                supervisor._current_proc is not None
+                and supervisor._current_proc.poll() is None
+            ):
+                return JSONResponse({"status": "already_running"}, status_code=409)
 
             thread = threading.Thread(target=_run_rescan, daemon=True)
             thread.start()

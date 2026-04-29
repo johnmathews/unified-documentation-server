@@ -417,34 +417,45 @@ class TestHealthEndpoint:
 
 class TestRescanEndpoint:
     def test_rescan_starts_background(self, app) -> None:
-        """POST /rescan should start ingestion in the background and return immediately."""
+        """POST /rescan should hand the cycle to the supervisor and return immediately.
+
+        We patch ``run_subprocess_cycle`` so the test does not actually spawn
+        a subprocess (which would shell out to ``python -m docserver.ingestion_worker``
+        and add ~5s to the test).
+        """
         starlette_app = app.streamable_http_app()
         client = TestClient(starlette_app)
-        response = client.post("/rescan")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["status"] == "started"
+
+        with patch.object(
+            server_module._get_supervisor(),
+            "run_subprocess_cycle",
+            return_value={"duration_s": 0.1},
+        ):
+            response = client.post("/rescan")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["status"] == "started"
 
     def test_rescan_rejects_concurrent(self, app) -> None:
-        """POST /rescan should return 409 if a rescan is already running."""
-        import time as _time
+        """POST /rescan should return 409 if the supervisor reports a cycle in flight."""
+        from unittest.mock import MagicMock
 
         starlette_app = app.streamable_http_app()
         client = TestClient(starlette_app)
 
-        # Make run_once block long enough to test concurrency
-        original_run_once = server_module._get_ingester().run_once
-
-        def slow_run_once(**kwargs: object) -> dict:
-            _time.sleep(0.5)
-            return original_run_once(**kwargs)
-
-        with patch.object(server_module._get_ingester(), "run_once", side_effect=slow_run_once):
-            first = client.post("/rescan")
-            assert first.status_code == 200
-            second = client.post("/rescan")
-            assert second.status_code == 409
-            assert second.json()["status"] == "already_running"
+        # Pretend the supervisor already has a running worker — the
+        # endpoint's cheap pre-check inspects _current_proc.
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None  # still running
+        supervisor = server_module._get_supervisor()
+        original = supervisor._current_proc
+        supervisor._current_proc = fake_proc
+        try:
+            response = client.post("/rescan")
+            assert response.status_code == 409
+            assert response.json()["status"] == "already_running"
+        finally:
+            supervisor._current_proc = original
 
 
 class TestFilesEndpoint:

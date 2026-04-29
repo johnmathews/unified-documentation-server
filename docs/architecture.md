@@ -117,9 +117,25 @@ Supports structured queries like:
 
 Parent docs (non-chunks) are returned by `query_documents()` so results represent whole files, not fragments.
 
-### ChromaDB (`/data/chroma/`)
+### ChromaDB (sidecar service)
 
-Stores chunk text with vector embeddings for semantic similarity search. Uses the **all-mpnet-base-v2** embedding model via ONNX Runtime (768 dimensions, ~500MB RAM, runs locally with no external API calls). ONNX Runtime was chosen over PyTorch-based sentence-transformers to keep Docker images small (~650MB vs ~8GB) and build times fast. The Dockerfile uses a multi-stage build: the builder stage installs dependencies and downloads the model, then the final stage copies the result with `--chown` to avoid layer duplication. Unused onnxruntime transitive dependencies (sympy, mpmath) are stripped in the builder stage.
+ChromaDB runs as a **separate Docker service** (the `chroma` container in
+`docker-compose.yml`) that owns its own volume at `/chroma-data`. The
+docserver and the ingestion worker both connect to it via
+`chromadb.HttpClient(host=DOCSERVER_CHROMA_HOST, port=DOCSERVER_CHROMA_PORT)`.
+
+This separation is required, not merely convenient: in `chromadb >= 1.5.x`,
+opening two `PersistentClient` instances against the same on-disk path
+corrupts the SQLite store backing Chroma (chroma-core/chroma#5868). With
+the ingestion worker now running as a separate process from the server,
+both processes need a single owner of the database — the sidecar fills
+that role.
+
+For tests, `KnowledgeBase` falls back to an in-process `PersistentClient`
+when `DOCSERVER_CHROMA_HOST` is unset. The test path is single-process so
+the sidecar is not needed.
+
+Stores chunk text with vector embeddings for semantic similarity search. Uses the **all-mpnet-base-v2** embedding model via ONNX Runtime (768 dimensions, ~500MB RAM, runs locally with no external API calls). The embedding model is loaded **client-side** (in the docserver and ingestion worker processes), not in the Chroma sidecar — only pre-computed vectors cross the wire. ONNX Runtime was chosen over PyTorch-based sentence-transformers to keep Docker images small (~650MB vs ~8GB) and build times fast. The Dockerfile uses a multi-stage build: the builder stage installs dependencies and downloads the model, then the final stage copies the result with `--chown` to avoid layer duplication. Unused onnxruntime transitive dependencies (sympy, mpmath) are stripped in the builder stage.
 
 Only chunks are stored in ChromaDB. Parent docs are excluded since they have no content body. Each chunk's metadata in ChromaDB includes `source`, `file_path`, `title`, `chunk_index`, `total_chunks`, and `section_path` for filtering.
 

@@ -919,6 +919,37 @@ def test_unload_embedding_model_delegates_to_ef(kb):
     assert result is True
 
 
+def test_kb_uses_http_client_when_chroma_host_set(tmp_path, monkeypatch):
+    """When chroma_host is set, KnowledgeBase should construct an HttpClient
+    instead of a PersistentClient. The HttpClient is mocked so the test
+    does not require a running Chroma server."""
+    from unittest.mock import MagicMock
+
+    from docserver.knowledge_base import KnowledgeBase
+
+    fake_collection = MagicMock()
+    fake_client = MagicMock()
+    fake_client.get_or_create_collection.return_value = fake_collection
+    monkeypatch.setattr(
+        "docserver.knowledge_base.chromadb.HttpClient",
+        MagicMock(return_value=fake_client),
+    )
+    # PersistentClient should NOT be called in this branch.
+    pclient = MagicMock()
+    monkeypatch.setattr("docserver.knowledge_base.chromadb.PersistentClient", pclient)
+
+    kb = KnowledgeBase(
+        str(tmp_path),
+        chroma_host="chroma-sidecar",
+        chroma_port=8000,
+    )
+
+    pclient.assert_not_called()
+    assert kb._chroma_client is fake_client
+    assert kb._collection is fake_collection
+    kb.close()
+
+
 def test_sqlite_journal_mode_is_wal(kb):
     """documents.db must be in WAL mode so the ingestion worker can write while the server reads."""
     import sqlite3 as _sqlite3

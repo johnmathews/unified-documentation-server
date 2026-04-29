@@ -1,9 +1,43 @@
 services:
+  chroma:
+    # Chroma runs as a sidecar so the docserver and the ingestion worker
+    # subprocess can both talk to a single owner of /chroma-data. Two
+    # PersistentClient instances on the same path corrupt the SQLite
+    # store backing Chroma 1.5.x (chroma-core/chroma#5868); the HTTP
+    # server serialises access correctly.
+    # Pinned to 1.5.8 — latest stable on Docker Hub at time of writing
+    # (1.5.9 is still in dev). Chroma's wire protocol is stable across patch
+    # versions, so the docserver's 1.5.5 Python client talks to this fine.
+    image: chromadb/chroma:1.5.8
+    container_name: unified-documentation-chroma
+    restart: unless-stopped
+    command: ["run", "--path", "/chroma-data", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - chroma-data:/chroma-data
+    expose:
+      - "8000"
+    mem_limit: 256m
+    mem_reservation: 100m
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "</dev/tcp/127.0.0.1/8000"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
   docserver:
     image: ghcr.io/johnmathews/unified-documentation-server:latest
     container_name: unified-documentation-server
     restart: unless-stopped
     stop_grace_period: 30s
+    depends_on:
+      chroma:
+        condition: service_healthy
     # A healthy steady state is ~150 MB (ONNX embedding model ~110 MB +
     # ChromaDB + SQLite + Python). 512 MB gives ~3x headroom for transient
     # ingestion spikes. If exceeded, Docker OOM-kills the container cleanly
@@ -31,6 +65,11 @@ services:
       # claude-opus-4-7 (current default), claude-opus-4-6, or
       # claude-sonnet-4-6 / claude-haiku-4-5 for cheaper inference.
       # - DOCSERVER_CHAT_MODEL=claude-opus-4-7
+      # ChromaDB sidecar location. Resolved by Docker's internal DNS to
+      # the chroma service above. Leave unset for tests (falls back to
+      # in-process PersistentClient).
+      - DOCSERVER_CHROMA_HOST=chroma
+      - DOCSERVER_CHROMA_PORT=8000
     logging:
       driver: json-file
       options:
@@ -56,3 +95,4 @@ services:
 
 volumes:
   docserver-data:
+  chroma-data:

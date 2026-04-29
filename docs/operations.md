@@ -345,6 +345,8 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 | `DOCSERVER_LOG_FORMAT` | `json` | Log output format: `json` for structured Docker log collection, `text` for human-readable local development. |
 | `DOCSERVER_LOG_LEVEL` | `INFO` | Python log level. Set to `DEBUG` for verbose ingestion diagnostics, `WARNING` to reduce noise. |
 | `DOCSERVER_CHAT_MODEL` | `claude-opus-4-7` | Anthropic model ID for the chat agent. Defaults to the current latest Opus alias. Anthropic does not publish a `-latest` alias for the Opus 4 family — set this to a specific version-aliased ID (e.g. `claude-opus-4-7`, `claude-opus-4-6`) or a pinned snapshot (e.g. `claude-opus-4-1-20250805`). To switch to a cheaper model, use `claude-sonnet-4-6` or `claude-haiku-4-5`. |
+| `DOCSERVER_CHROMA_HOST` | `chroma` (in compose) | Hostname of the Chroma sidecar service. When set, the docserver and ingestion worker connect via `chromadb.HttpClient` instead of opening a `PersistentClient` directly. **Required in production** — two `PersistentClient` instances on the same on-disk path corrupt the store in Chroma 1.5.x. Leave unset for tests, which use `PersistentClient` against a tmp dir. |
+| `DOCSERVER_CHROMA_PORT` | `8000` | Port the Chroma sidecar listens on. Matches the `--port` argument to `chroma run`. |
 
 Changes to environment variables require a container restart to take effect.
 

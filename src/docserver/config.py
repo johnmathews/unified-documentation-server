@@ -59,6 +59,13 @@ class Config:
     poll_interval_seconds: int = 30
     server_host: str = "0.0.0.0"
     server_port: int = 8080
+    # When chroma_host is set, KnowledgeBase uses chromadb.HttpClient against
+    # the sidecar service. When None, it falls back to chromadb.PersistentClient
+    # against ``{data_dir}/chroma``. Tests use the latter; production sets the
+    # former via DOCSERVER_CHROMA_HOST so the docserver and the ingestion
+    # worker can share the database safely.
+    chroma_host: str | None = None
+    chroma_port: int = 8000
 
 
 def _parse_sources(raw: list[dict[str, object]]) -> list[RepoSource]:
@@ -186,10 +193,27 @@ def load_config(path: str | None = None) -> Config:
         )
     )
 
+    chroma_host_env = os.environ.get("DOCSERVER_CHROMA_HOST")
+    chroma_host: str | None
+    if chroma_host_env is not None:
+        chroma_host = chroma_host_env or None
+    else:
+        chroma_host_yaml = raw.get("chroma_host")
+        chroma_host = str(chroma_host_yaml) if chroma_host_yaml else None
+
+    chroma_port = int(
+        os.environ.get(
+            "DOCSERVER_CHROMA_PORT",
+            str(raw.get("chroma_port", 8000)),
+        )
+    )
+
     return Config(
         sources=sources,
         data_dir=data_dir,
         poll_interval_seconds=poll_interval_seconds,
         server_host=server_host,
         server_port=server_port,
+        chroma_host=chroma_host,
+        chroma_port=chroma_port,
     )

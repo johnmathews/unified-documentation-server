@@ -17,6 +17,27 @@ def test_load_config_defaults_when_no_file():
     assert config.poll_interval_seconds == 300
     assert config.server_host == "0.0.0.0"
     assert config.server_port == 8080
+    # chroma_host defaults to None — KnowledgeBase falls back to PersistentClient.
+    assert config.chroma_host is None
+    assert config.chroma_port == 8000
+
+
+def test_chroma_env_vars(monkeypatch):
+    """DOCSERVER_CHROMA_HOST/PORT should be picked up by load_config."""
+    monkeypatch.setenv("DOCSERVER_CHROMA_HOST", "chroma-sidecar")
+    monkeypatch.setenv("DOCSERVER_CHROMA_PORT", "9000")
+    config = load_config("/nonexistent/path.yaml")
+    assert config.chroma_host == "chroma-sidecar"
+    assert config.chroma_port == 9000
+
+
+def test_chroma_host_empty_string_treated_as_none(monkeypatch):
+    """An explicitly-empty DOCSERVER_CHROMA_HOST should fall back to None
+    so the KnowledgeBase still uses PersistentClient. This matters in tests
+    or local dev where the env var might be set to "" by mistake."""
+    monkeypatch.setenv("DOCSERVER_CHROMA_HOST", "")
+    config = load_config("/nonexistent/path.yaml")
+    assert config.chroma_host is None
 
 
 def test_load_config_from_yaml():

@@ -1529,7 +1529,11 @@ def init_app(config: Config | None = None) -> FastMCP:
         config = load_config()
     _config = config
 
-    _kb = KnowledgeBase(config.data_dir)
+    _kb = KnowledgeBase(
+        config.data_dir,
+        chroma_host=config.chroma_host,
+        chroma_port=config.chroma_port,
+    )
     _ingester = Ingester(config, _kb)
     _conversations = ConversationStore(config.data_dir)
     _bookmarks = BookmarkStore(config.data_dir)

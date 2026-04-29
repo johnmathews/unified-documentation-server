@@ -106,29 +106,68 @@ class KnowledgeBase:
 
     _CHROMA_BATCH_SIZE: ClassVar[int] = 64  # max chunks per ChromaDB upsert call
 
-    def __init__(self, data_dir: str) -> None:
+    def __init__(
+        self,
+        data_dir: str,
+        *,
+        chroma_host: str | None = None,
+        chroma_port: int = 8000,
+    ) -> None:
+        """Initialise the knowledge base.
+
+        SQLite always lives at ``{data_dir}/documents.db``. ChromaDB has two
+        backends:
+          - When ``chroma_host`` is set, uses ``chromadb.HttpClient`` against
+            the sidecar service. This is the production path: the docserver
+            and ingestion worker can both connect to the same Chroma server
+            without corrupting the store.
+          - When ``chroma_host`` is None, falls back to
+            ``chromadb.PersistentClient`` at ``{data_dir}/chroma``. This is
+            single-process only and used by the test suite.
+        """
         logger.info(
             "Initializing knowledge base in %s",
             data_dir,
             extra={"event": "kb_init"},
         )
         os.makedirs(data_dir, exist_ok=True)
-        chroma_dir = os.path.join(data_dir, "chroma")
-        os.makedirs(chroma_dir, exist_ok=True)
 
         self._db_path = os.path.join(data_dir, "documents.db")
         self._init_sqlite()
         logger.info("SQLite initialized at %s", self._db_path, extra={"event": "kb_init"})
 
-        self._chroma_client = chromadb.PersistentClient(path=chroma_dir)
         self._embedding_fn = OnnxEmbeddingFunction()
+        if chroma_host:
+            self._chroma_client = chromadb.HttpClient(
+                host=chroma_host,
+                port=chroma_port,
+            )
+            logger.info(
+                "ChromaDB connected via HttpClient to %s:%d",
+                chroma_host,
+                chroma_port,
+                extra={
+                    "event": "kb_init",
+                    "chroma_host": chroma_host,
+                    "chroma_port": chroma_port,
+                },
+            )
+        else:
+            chroma_dir = os.path.join(data_dir, "chroma")
+            os.makedirs(chroma_dir, exist_ok=True)
+            self._chroma_client = chromadb.PersistentClient(path=chroma_dir)
+            logger.info(
+                "ChromaDB initialized as PersistentClient at %s",
+                chroma_dir,
+                extra={"event": "kb_init"},
+            )
+
         self._collection = self._chroma_client.get_or_create_collection(
             name=_CHROMA_COLLECTION,
             embedding_function=self._embedding_fn,
         )
         logger.info(
-            "ChromaDB initialized at %s (collection: %s)",
-            chroma_dir,
+            "ChromaDB collection ready: %s",
             _CHROMA_COLLECTION,
             extra={"event": "kb_init"},
         )

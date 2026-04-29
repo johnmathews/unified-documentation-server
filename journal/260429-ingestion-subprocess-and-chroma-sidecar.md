@@ -91,6 +91,71 @@ Coverage holds at 87%. Ruff clean.
    container log stream stays homogeneous; the worker's `pid` field
    distinguishes its lines from the docserver's.
 
+## Operational implications
+
+These are the things the operator on the home server has to deal with
+after this change lands, beyond the code.
+
+1. **Three compose services instead of two.** `docker compose up -d`
+   now starts `chroma`, `docserver`, and `documentation-webapp` in that
+   dependency order. `docker compose ps` lists three containers. A new
+   image (`chromadb/chroma:1.5.8`, ~700 MB) needs to be pulled on first
+   deploy.
+2. **Two named volumes.** `docserver-data` keeps SQLite + git clones +
+   the cached ONNX model; the new `chroma-data` keeps the vector store.
+   A complete backup needs both — `docker cp
+   unified-documentation-server:/data` alone is no longer sufficient.
+   The full restore + selective-rebuild commands are documented in
+   `docs/operations.md` § Backup and Restore.
+3. **First-deploy data migration is implicit and free.** The old
+   `/data/chroma/` directory inside `docserver-data` is no longer read
+   by anyone — the new `KnowledgeBase` connects to the sidecar at
+   `chroma:8000` regardless. The new `chroma-data` volume starts empty,
+   so the first ingestion cycle re-embeds every chunk (a few minutes of
+   CPU on the worker, no operator action). The old `/data/chroma/` can
+   be deleted to reclaim disk space but is harmless if left.
+4. **Update flow.** `docker compose pull && docker compose up -d` pulls
+   all three images and recreates containers. Both volumes are
+   preserved. Roll back by re-pinning `chromadb/chroma:1.5.8` and
+   `:latest` to a specific older sha and running `pull && up -d` again.
+5. **What happens when chroma is unreachable.** The docserver's startup
+   waits for chroma's healthcheck before starting (compose
+   `depends_on: condition: service_healthy`), so the server only comes
+   up when chroma is reachable. If chroma falls over later, the
+   docserver's `/api/search` and chat tool-use loop both fail with
+   `chromadb.HttpClient` connection errors propagated as 5xx. Restart
+   chroma to recover; docserver does not need a restart.
+6. **Documentation was synced separately** (commits `93920e4` and
+   `7d49f8d`): README architecture diagram, host port table, env var
+   list, the Updating to a new release section, and the operations.md
+   backup/restore + resource-usage tables now reflect the three-service
+   shape.
+
+## What the docserver process actually holds in memory
+
+A subtlety worth noting because the framing "ingestion is now in a
+subprocess" can mislead.
+
+The docserver process still loads the ONNX embedding model. The
+`OnnxEmbeddingFunction` is registered on the Chroma collection client-
+side, so when the docserver handles `/api/search` or the chat agent's
+`search_docs` tool call, the model is invoked **inside the docserver
+process** to embed the query before the vector goes over the wire to
+the chroma sidecar. This is lazy: the model is mmapped on the first
+real search query after startup and stays resident.
+
+What the subprocess pattern actually buys is decoupling **peak**
+allocation from the long-running process. Ingestion's tokenisation,
+numpy intermediates, KB-write buffers, and the embedding batch are all
+in the worker; when the worker exits, the OS reclaims its address
+space. The docserver's RSS stabilises at roughly:
+
+    ~50 MB Python + ~110 MB mmap'd ONNX model = ~160 MB
+
+versus the pre-WU6 ~350 MB+ peaks during ingestion that were OOM-
+killing it on the 512 MB cap. The two-process split is what unlocks
+that, not the model being moved out of the docserver.
+
 ## Empirical risks not yet verified
 
 These are not blocking, but the user should know they are unverified

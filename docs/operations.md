@@ -4,7 +4,8 @@
 
 ### Health Endpoint
 
-`GET :8080/health` returns JSON with the current indexing status and per-source breakdown:
+`GET http://localhost:8085/health` from the host (`/health` on port `8080` inside the docserver container)
+returns JSON with the current indexing status and per-source breakdown:
 
 ```json
 {
@@ -48,7 +49,8 @@ Returns **503** with `{"status": "error"}` if the knowledge base is unreachable.
 
 ### Rescan Endpoint
 
-`POST :8080/rescan` triggers an immediate ingestion cycle without waiting for the next poll interval. Optionally pass `?source=name` to rescan a single source.
+`POST http://localhost:8085/rescan` (port `8080` inside the docserver container) triggers an immediate ingestion
+cycle without waiting for the next poll interval. Optionally pass `?source=name` to rescan a single source.
 
 ```bash
 # Rescan all sources
@@ -240,58 +242,87 @@ Files over 5MB are skipped during ingestion. A warning is logged with the file p
 
 ## Backup and Restore
 
-All persistent data lives in the `docserver-data` Docker volume, mounted at `/data` inside the container.
+Persistent data is split across **two** Docker volumes since the chroma sidecar split (WU6):
 
-Contents:
+| Volume           | Mounted at                | Contents                                                          |
+|------------------|---------------------------|-------------------------------------------------------------------|
+| `docserver-data` | `/data` in docserver       | `/data/documents.db` (SQLite metadata, in WAL mode), `/data/clones/` (git working trees), `/data/models/` (cached ONNX embedding model, ~110 MB) |
+| `chroma-data`    | `/chroma-data` in chroma sidecar | ChromaDB vector store (chunk text + embeddings)             |
 
-| Path | Description |
-|------|-------------|
-| `/data/documents.db` | SQLite database (document metadata) |
-| `/data/chroma/` | ChromaDB vector store (embeddings) |
-| `/data/clones/` | Git clones of remote repos |
-| `/data/models/` | Cached ONNX embedding model (~110MB) |
+A complete backup needs both volumes — backing up only `docserver-data` will leave you without the embeddings on
+restore, forcing a full re-index of every document.
 
 ### Backup
 
 ```bash
 docker cp unified-documentation-server:/data /backup/docserver-data
+docker cp unified-documentation-chroma:/chroma-data /backup/chroma-data
 ```
+
+For a more atomic snapshot, stop the stack first (`docker compose stop`) so neither side writes while the copy runs.
 
 ### Restore
 
-Copy the backed-up data back into the volume and restart the container.
+Stop the stack, restore both volumes, then start:
+
+```bash
+docker compose down
+docker run --rm -v unified-documentation-server_docserver-data:/data \
+  -v /backup/docserver-data:/backup busybox sh -c 'cp -a /backup/. /data/'
+docker run --rm -v unified-documentation-server_chroma-data:/chroma-data \
+  -v /backup/chroma-data:/backup busybox sh -c 'cp -a /backup/. /chroma-data/'
+docker compose up -d
+```
 
 ### Full rebuild
 
-The data is fully rebuildable from source repositories. Deleting the volume and restarting the container will re-clone all repos and re-index everything from scratch. This takes longer than restoring a backup but requires no backup files.
+All data is rebuildable from source repositories. Deleting both volumes and restarting will re-clone every source and
+re-index every document from scratch. Takes longer than restoring a backup but needs no backup files.
 
 ```bash
-docker compose down -v   # removes the volume
-docker compose up -d     # rebuilds from source repos
+docker compose down -v   # removes both volumes
+docker compose up -d     # rebuilds from source repos on the next ingestion cycle
+```
+
+If only the chroma store is corrupted (e.g. after a Chroma major upgrade with an incompatible on-disk format), you can
+nuke just that volume and the SQLite metadata will tell the worker to re-embed every chunk:
+
+```bash
+docker compose down
+docker volume rm unified-documentation-server_chroma-data
+docker compose up -d
 ```
 
 ## Resource Usage
 
-| Resource | Typical | Limit |
-|----------|---------|-------|
-| Memory | ~150 MB steady state (ONNX embedding model ~110 MB + ChromaDB + SQLite) | 512 MB (`mem_limit`), 200 MB reservation (set in `docker-compose.yml`) |
-| Disk | ~100 MB per 10K documents | -- |
-| CPU | Low at idle; spikes during ingestion (embedding generation) | -- |
+Split across the three compose services since WU6:
 
-Log rotation: 3 files of 10 MB max (configured in `docker-compose.yml` logging options).
+| Service     | Typical RSS                                   | `mem_limit` | Notes                                                 |
+|-------------|-----------------------------------------------|-------------|-------------------------------------------------------|
+| `docserver` | ~50–80 MB steady state (no embedding model)   | 512 MB      | Spawns the ingestion worker per cycle; itself stays small. |
+| ingestion worker (transient subprocess of docserver) | up to ~350 MB during a cycle, 0 between | inherits the container's 512 MB; capped to 400 MB by `RLIMIT_AS` (`DOCSERVER_INGEST_MEM_LIMIT_MB`) | Loads the ONNX model on every cycle, exits when done — RSS returns to the OS. |
+| `chroma`    | ~50–100 MB depending on index size            | 256 MB      | Stateless above its `/chroma-data` volume.            |
+
+Disk: ~100 MB per 10K documents (mostly embeddings in `chroma-data`).
+
+CPU: low at idle; spikes during ingestion (embedding generation in the worker subprocess). The worker runs at `nice
++10` by default (`DOCSERVER_INGEST_NICE`) so it yields to the docserver's request handlers on a contended core.
+
+Log rotation: 3 files of 10 MB max for the docserver, 3 × 5 MB for chroma + webapp (configured per service in
+`docker-compose.yml`).
 
 ### Memory reclaim
 
-After every ingestion cycle, `Ingester._run_once_safe` runs `gc.collect()` and (on
-glibc-based Linux) calls `libc.malloc_trim(0)` to return unused pages back to the
-kernel. Without this, Python frees objects allocated by GitPython, subprocess git
-invocations, and ChromaDB, but glibc's malloc arenas retain the freed pages, so the
-container's RSS grows over hours until it is OOM-killed.
+Before WU6 the docserver process ran ingestion on a thread, so it accumulated glibc-arena pages over hours.
+`Ingester._run_once_safe` ran `gc.collect()` and `libc.malloc_trim(0)` after each cycle to flush the arenas back to
+the kernel, and that path still exists for tests that exercise the in-process `Ingester` directly.
 
-Each cycle logs the before/after RSS at level `INFO` under the event
-`memory_reclaim`; watch these numbers if RSS starts to grow unbounded. The limit
-is deliberately set low (512 MB) so that a regression is surfaced by a clean
-OOM-kill and restart rather than by exhausting the host VM.
+In production it is mostly redundant: the ingestion worker is a fresh subprocess per cycle, so its entire heap is
+returned to the OS on exit. The docserver itself does not allocate at ingestion-cycle scale, so its RSS stays close to
+its tens-of-megabytes steady state without help.
+
+If you ever see the **docserver** RSS climb unbounded over hours, that is now a regression rather than expected — open
+a bug.
 
 ## Configuration Changes
 

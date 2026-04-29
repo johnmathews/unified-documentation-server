@@ -137,16 +137,38 @@ cp config/sources.example.yaml config/sources.yaml
 # Edit config/sources.yaml to add your documentation repos
 ```
 
-### 2. Run with Docker Compose
+### 2. Set required secrets
+
+The chat agent calls the Anthropic API. Either export `ANTHROPIC_API_KEY` in your shell before running compose, or
+write it into a local `.env` file (Docker Compose auto-loads `.env` from the project root):
 
 ```bash
-# Add volume mounts for local repos in docker-compose.yml, then:
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+```
+
+If you do not need the chat endpoints, set `ANTHROPIC_API_KEY=unset` (or any non-empty value) and skip them — the
+search and metadata MCP tools work without an Anthropic key.
+
+### 3. Run with Docker Compose
+
+```bash
+# Add volume mounts for local repos in docker-compose.yml first, then:
 docker compose up -d
 ```
 
-The server starts on port 8080 and begins indexing immediately.
+This brings up three containers — `chroma`, `docserver`, and `documentation-webapp` — and three named volumes
+(`chroma-data`, `docserver-data`, plus the implicit anonymous volumes the images create). The webapp waits for the
+docserver's `/health` to be green before starting; the docserver waits for the chroma sidecar to be reachable.
 
-### 3. Connect from an MCP client
+Host ports (per `docker-compose.yml`):
+
+| Service                | Host | Container | Notes                            |
+| ---------------------- | ---- | --------- | -------------------------------- |
+| `docserver`            | 8085 | 8080      | MCP and REST endpoints           |
+| `documentation-webapp` | 3002 | 3000      | Browser UI                       |
+| `chroma`               | —    | 8000      | Internal only; not exposed       |
+
+### 4. Connect from an MCP client
 
 Add to your MCP client configuration (e.g., `.mcp.json`):
 
@@ -154,11 +176,34 @@ Add to your MCP client configuration (e.g., `.mcp.json`):
 {
  "mcpServers": {
   "documentation": {
-   "url": "http://localhost:8080/mcp"
+   "url": "http://localhost:8085/mcp"
   }
  }
 }
 ```
+
+### Updating to a new release
+
+The `latest` tag on each image is overwritten on every push to `main`. To pull a fresh build:
+
+```bash
+docker compose pull              # pulls all 3 images
+docker compose up -d             # recreates containers using the new images
+```
+
+The persistent volumes (`docserver-data`, `chroma-data`) are preserved across this — no re-ingestion is needed unless
+the sidecar's storage format has changed in a major Chroma upgrade. Roll back with `docker compose pull --policy never`
+plus an explicit older tag if a release is broken.
+
+### Persistent volumes
+
+| Volume           | Mounted at         | What it holds                                             |
+| ---------------- | ------------------ | --------------------------------------------------------- |
+| `docserver-data` | `/data` in docserver | SQLite (`documents.db`), git clones (`/data/clones/`), cached ONNX embedding model (`/data/models/`) |
+| `chroma-data`    | `/chroma-data` in chroma | ChromaDB vector store (chunks + embeddings)         |
+
+`config/sources.yaml` is bind-mounted read-only into the docserver container — edit it on the host and run
+`docker compose restart docserver` to pick up changes (see `docs/operations.md` § Configuration Changes).
 
 ## Configuration
 

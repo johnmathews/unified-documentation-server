@@ -76,7 +76,7 @@ The Dockerfile configures a health check against `/health`:
 
 - Interval: 30s
 - Timeout: 10s
-- Start period: 120s (allows time for embedding model load and first ingestion)
+- Start period: 60s (the embedding model is now baked into the image at build time so cold start no longer downloads it)
 - Retries: 3
 
 ### Logging
@@ -220,7 +220,7 @@ If you push changes to a source repo but the docserver logs keep showing `"All N
 
 1. Hit the health endpoint and check `total_chunks`. If 0, no documents have been indexed.
 2. Verify `config/sources.yaml` has sources configured and paths are correct.
-3. First ingestion runs immediately on startup -- if the container just started, wait for the start period (up to 120s) and check again.
+3. First ingestion runs immediately on startup -- if the container just started, wait for the start period (up to 60s) and check again.
 4. Check logs for ingestion errors on the source you expect results from.
 5. Look for `no_files_matched` events which include directory contents and pattern diagnostics.
 
@@ -232,7 +232,7 @@ Common causes:
 
 - The `/data` volume is not mounted or not writable. Verify the `docserver-data` volume exists and the container user (UID 1000) has write access.
 - The server failed to start. Check container logs with `docker logs unified-documentation-server`.
-- The embedding model is still loading. The start period is 120s to account for this.
+- The server is still booting. The start period is 60s to allow Python init, KB open, and the first MCP server bind.
 
 ### Large files skipped
 

@@ -40,7 +40,11 @@ USER docserver
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+# start-period was 120s when the embedding model was downloaded on first
+# boot. Since commit e178a52 the model is baked into the image at build
+# time, so cold start no longer waits on a network download. 60s is enough
+# for Python interpreter init + KB open + first MCP server bind.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -sf http://localhost:8080/health || exit 1
 
 CMD [".venv/bin/python", "-m", "docserver"]

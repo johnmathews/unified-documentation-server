@@ -46,7 +46,8 @@ services:
     environment:
       - API_URL=http://docserver:8080
     depends_on:
-      - docserver
+      docserver:
+        condition: service_healthy
     logging:
       driver: json-file
       options:

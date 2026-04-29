@@ -347,6 +347,8 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 | `DOCSERVER_CHAT_MODEL` | `claude-opus-4-7` | Anthropic model ID for the chat agent. Defaults to the current latest Opus alias. Anthropic does not publish a `-latest` alias for the Opus 4 family — set this to a specific version-aliased ID (e.g. `claude-opus-4-7`, `claude-opus-4-6`) or a pinned snapshot (e.g. `claude-opus-4-1-20250805`). To switch to a cheaper model, use `claude-sonnet-4-6` or `claude-haiku-4-5`. |
 | `DOCSERVER_CHROMA_HOST` | `chroma` (in compose) | Hostname of the Chroma sidecar service. When set, the docserver and ingestion worker connect via `chromadb.HttpClient` instead of opening a `PersistentClient` directly. **Required in production** — two `PersistentClient` instances on the same on-disk path corrupt the store in Chroma 1.5.x. Leave unset for tests, which use `PersistentClient` against a tmp dir. |
 | `DOCSERVER_CHROMA_PORT` | `8000` | Port the Chroma sidecar listens on. Matches the `--port` argument to `chroma run`. |
+| `DOCSERVER_INGEST_NICE` | `10` (in supervisor) | Nice offset applied at the start of each ingestion worker subprocess. Lower CPU priority than the docserver process, so the request handlers stay responsive on a contended core. Set to `0` to disable. |
+| `DOCSERVER_INGEST_MEM_LIMIT_MB` | unset (compose: `400`) | Soft + hard ceiling on the worker's address space (`RLIMIT_AS`), in MiB. When set lower than the container's `mem_limit`, the worker is killed first under memory pressure, leaving the docserver process untouched. |
 
 Changes to environment variables require a container restart to take effect.
 

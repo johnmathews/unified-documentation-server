@@ -268,5 +268,12 @@ class IngesterSupervisor:
         return rc, metrics_payload
 
     def _worker_env(self) -> dict[str, str]:
-        """Build the env passed to the worker subprocess."""
-        return dict(os.environ)
+        """Build the env passed to the worker subprocess.
+
+        Defaults DOCSERVER_INGEST_NICE=10 so the worker yields CPU to the
+        server's request-handler threads on a contended core. The operator
+        can override via the env or unset it explicitly.
+        """
+        env = dict(os.environ)
+        env.setdefault("DOCSERVER_INGEST_NICE", "10")
+        return env

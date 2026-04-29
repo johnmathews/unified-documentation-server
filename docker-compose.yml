@@ -70,6 +70,10 @@ services:
       # in-process PersistentClient).
       - DOCSERVER_CHROMA_HOST=chroma
       - DOCSERVER_CHROMA_PORT=8000
+      # Cap the ingestion worker subprocess at 400 MiB of address space.
+      # The container's mem_limit is 512m above; a worker close to OOM
+      # will be killed before it can take the docserver process down.
+      - DOCSERVER_INGEST_MEM_LIMIT_MB=400
     logging:
       driver: json-file
       options:

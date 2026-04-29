@@ -636,6 +636,7 @@ def create_mcp(config: Config) -> FastMCP:
                     "total_chunks": sum(s.get("chunk_count", 0) for s in summary),
                     "poll_interval_seconds": poll_interval,
                     "sources": sources_out,
+                    "last_ingestion": ingester._last_ingestion,
                 }
             )
         except Exception:

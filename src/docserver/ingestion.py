@@ -19,6 +19,7 @@ import resource
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1015,6 +1016,10 @@ class Ingester:
         self._scheduler = BackgroundScheduler()
         self._managers: dict[str, RepoManager] = {}
         self._last_check_times: dict[str, str] = {}
+        # Diagnostics from the most recent run_once call, surfaced via /health.
+        # ru_maxrss is monotonically non-decreasing for the process lifetime,
+        # so rss_at_end_mb is the lifetime peak observed when this cycle ended.
+        self._last_ingestion: dict[str, str | int | float] | None = None
         self._build_managers()
 
     # ------------------------------------------------------------------
@@ -1184,6 +1189,10 @@ class Ingester:
         Returns a dict keyed by source name with ``{upserted, deleted}``
         counts.
         """
+        cycle_start_t = time.perf_counter()
+        rss_at_start_mb = _rss_mb()
+        flush_durations: list[float] = []
+
         # Clean up sources that were removed or renamed in config.
         if not sources:
             self.cleanup_orphaned_sources()
@@ -1367,6 +1376,7 @@ class Ingester:
                     return
                 batch_size = len(upsert_batch)
                 chunk_count = sum(1 for _, _, m in upsert_batch if m.get("is_chunk"))
+                flush_t0 = time.perf_counter()
                 try:
                     self.kb.upsert_documents_batch(upsert_batch)
                     _stats["upserted"] += batch_size
@@ -1400,6 +1410,7 @@ class Ingester:
                         except Exception:
                             logger.exception("Failed to upsert '%s'.", item_id)
                             _stats["errors"] += 1
+                flush_durations.append(time.perf_counter() - flush_t0)
                 upsert_batch = []
 
             for file_idx, file_path in enumerate(files, 1):
@@ -1590,6 +1601,33 @@ class Ingester:
             "Ingestion cycle finished: %s",
             {name: s for name, s in stats.items()},
             extra={"event": "ingestion_done", "stats": stats},
+        )
+
+        duration_s = time.perf_counter() - cycle_start_t
+        rss_at_end_mb = _rss_mb()
+        flush_total_s = sum(flush_durations)
+        flush_max_s = max(flush_durations) if flush_durations else 0.0
+        self._last_ingestion = {
+            "completed_at": datetime.now(UTC).isoformat(),
+            "duration_s": round(duration_s, 2),
+            "rss_at_start_mb": round(rss_at_start_mb, 1),
+            "rss_at_end_mb": round(rss_at_end_mb, 1),
+            "rss_growth_mb": round(rss_at_end_mb - rss_at_start_mb, 1),
+            "flush_count": len(flush_durations),
+            "flush_total_s": round(flush_total_s, 2),
+            "flush_max_s": round(flush_max_s, 2),
+        }
+        logger.info(
+            "Ingestion cycle metrics: duration=%.1fs rss_start=%.0fMB rss_end=%.0fMB "
+            "growth=%+.0fMB flushes=%d flush_total=%.1fs flush_max=%.1fs",
+            duration_s,
+            rss_at_start_mb,
+            rss_at_end_mb,
+            rss_at_end_mb - rss_at_start_mb,
+            len(flush_durations),
+            flush_total_s,
+            flush_max_s,
+            extra={"event": "ingestion_cycle_metrics", **self._last_ingestion},
         )
 
         return stats

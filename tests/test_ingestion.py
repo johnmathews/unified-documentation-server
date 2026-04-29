@@ -788,6 +788,40 @@ class TestIngester:
         assert "repo-a:readme.md" in ids
         assert "repo-a:guide.md" in ids
 
+    def test_run_once_records_cycle_metrics(self, tmp_path: Path, kb) -> None:
+        """run_once should populate _last_ingestion with timing and RSS metrics."""
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "repo-metrics",
+            {"readme.md": "# Hello\n\nWorld."},
+        )
+        config = Config(
+            sources=[RepoSource(name="repo-metrics", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        assert ingester._last_ingestion is None
+
+        ingester.run_once()
+
+        m = ingester._last_ingestion
+        assert m is not None
+        for key in (
+            "completed_at",
+            "duration_s",
+            "rss_at_start_mb",
+            "rss_at_end_mb",
+            "rss_growth_mb",
+            "flush_count",
+            "flush_total_s",
+            "flush_max_s",
+        ):
+            assert key in m, f"missing {key}"
+        assert isinstance(m["duration_s"], float)
+        assert m["duration_s"] >= 0.0
+        # We wrote one source with one file; at least one batch must have flushed.
+        assert m["flush_count"] >= 1
+
     def test_run_once_with_pdf_files(self, tmp_path: Path, kb) -> None:
         """run_once should index PDFs as metadata-only (no chunks)."""
         source_dir = self._make_source_dir(

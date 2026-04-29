@@ -200,6 +200,9 @@ class TestHealthEndpoint:
         assert "poll_interval_seconds" in body
         assert "sources" in body
         assert isinstance(body["sources"], list)
+        assert "last_ingestion" in body
+        # Initially None until the ingester completes its first cycle.
+        assert body["last_ingestion"] is None or isinstance(body["last_ingestion"], dict)
         # Verify per-source structure if sources exist
         if body["sources"]:
             src = body["sources"][0]
@@ -211,6 +214,31 @@ class TestHealthEndpoint:
             assert "last_indexed" in src
             assert "last_error" in src
             assert "consecutive_failures" in src
+
+    def test_health_last_ingestion_after_cycle(self, app) -> None:
+        """/health should expose the most recent ingestion cycle metrics."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        ingester = server_module._get_ingester()
+        ingester._last_ingestion = {
+            "completed_at": "2026-04-29T12:00:00+00:00",
+            "duration_s": 4.2,
+            "rss_at_start_mb": 180.0,
+            "rss_at_end_mb": 240.0,
+            "rss_growth_mb": 60.0,
+            "flush_count": 3,
+            "flush_total_s": 3.5,
+            "flush_max_s": 1.6,
+        }
+
+        response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["last_ingestion"] is not None
+        assert body["last_ingestion"]["duration_s"] == 4.2
+        assert body["last_ingestion"]["rss_at_end_mb"] == 240.0
+        assert body["last_ingestion"]["flush_count"] == 3
 
     def test_health_includes_last_checked(self, app) -> None:
         """GET /health should include last_checked from ingester check times."""

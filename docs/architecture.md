@@ -1,5 +1,11 @@
 # Architecture
 
+> Looking for *why* a particular shape was chosen rather than *what* it
+> looks like? See [Architecture Decision Records](adr/README.md). The
+> ADR set covers the chroma sidecar topology (ADR 0001), the per-cycle
+> ingestion subprocess (ADR 0002), and the chat-model startup probe
+> (ADR 0003).
+
 ## Overview
 
 The Unified Documentation Server has three layers:

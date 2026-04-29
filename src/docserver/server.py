@@ -44,6 +44,63 @@ logger = logging.getLogger(__name__)
 CHAT_MODEL = "claude-opus-4-7"
 CHAT_MAX_TOKENS = 2048
 
+# Updated by _probe_chat_model() at server startup. Defaults to True so the
+# /api/chat handler does not block when the probe is skipped (no API key).
+# Set to False if the probe definitively confirms the configured model is
+# not resolvable; the chat handlers short-circuit with 503 in that case.
+_chat_model_valid: bool = True
+_chat_model_error: str | None = None
+
+
+def _probe_chat_model(chat_model: str) -> None:
+    """Verify the configured chat model resolves on the Anthropic API.
+
+    Updates module-level ``_chat_model_valid`` / ``_chat_model_error`` so the
+    /health endpoint can surface the result and the chat handlers can
+    short-circuit cleanly. No-op if ``ANTHROPIC_API_KEY`` is unset — without
+    a key we cannot probe and must assume the configuration is valid until
+    a real request arrives. A network-level failure during the probe is
+    treated as transient and does not mark the model invalid.
+    """
+    global _chat_model_valid, _chat_model_error
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.info(
+            "Chat model probe skipped: ANTHROPIC_API_KEY not set.",
+            extra={"event": "chat_model_probe_skipped", "model": chat_model},
+        )
+        return
+    try:
+        client = anthropic.Anthropic()
+        client.models.retrieve(chat_model)
+    except anthropic.NotFoundError as exc:
+        _chat_model_valid = False
+        _chat_model_error = exc.message
+        logger.error(
+            "Chat model probe failed: '%s' is not a valid Anthropic model — "
+            "/api/chat will return 503 until the configuration is corrected. "
+            "Set DOCSERVER_CHAT_MODEL to a valid model ID and restart.",
+            chat_model,
+            extra={
+                "event": "chat_model_probe_failed",
+                "model": chat_model,
+                "error": exc.message,
+            },
+        )
+    except anthropic.APIConnectionError as exc:
+        logger.warning(
+            "Chat model probe could not reach Anthropic API: %s — assuming valid.",
+            exc,
+            extra={"event": "chat_model_probe_network_error", "model": chat_model},
+        )
+    else:
+        _chat_model_valid = True
+        _chat_model_error = None
+        logger.info(
+            "Chat model probe ok: %s",
+            chat_model,
+            extra={"event": "chat_model_probe_ok", "model": chat_model},
+        )
+
 # ---- Chat prompt building (pure functions, testable) -------------------------
 
 CHAT_SYSTEM_INSTRUCTIONS = (
@@ -637,6 +694,8 @@ def create_mcp(config: Config) -> FastMCP:
                     "poll_interval_seconds": poll_interval,
                     "sources": sources_out,
                     "last_ingestion": ingester._last_ingestion,
+                    "chat_model_valid": _chat_model_valid,
+                    "chat_model_error": _chat_model_error,
                 }
             )
         except Exception:
@@ -795,6 +854,17 @@ def create_mcp(config: Config) -> FastMCP:
         if request.method == "OPTIONS":
             return _cors_json({})
 
+        if not _chat_model_valid:
+            logger.warning(
+                "Chat request rejected: chat_model_valid=False (%s).",
+                _chat_model_error,
+                extra={"event": "chat_rejected_misconfigured", "error": _chat_model_error},
+            )
+            return _cors_json(
+                {"error": f"Chat is misconfigured: {_chat_model_error or 'invalid model'}"},
+                503,
+            )
+
         try:
             req = await _prepare_chat_request(request)
             if isinstance(req, JSONResponse):
@@ -912,9 +982,15 @@ def create_mcp(config: Config) -> FastMCP:
         except anthropic.RateLimitError:
             logger.warning("Anthropic rate limit hit in chat.", extra={"event": "chat_rate_limit"})
             return _cors_json({"error": "Rate limit reached — please wait a moment and try again."}, 429)
+        except (anthropic.NotFoundError, anthropic.BadRequestError) as exc:
+            logger.exception("Anthropic config error in chat.")
+            return _cors_json({"error": f"AI service config error: {exc.message}"}, 500)
+        except (anthropic.APIConnectionError, anthropic.InternalServerError) as exc:
+            logger.exception("Anthropic upstream unreachable in chat.")
+            return _cors_json({"error": f"AI service unreachable: {exc.message}"}, 502)
         except anthropic.APIError as exc:
             logger.exception("Anthropic API error in chat.")
-            return _cors_json({"error": f"AI service error: {exc.message}"}, 502)
+            return _cors_json({"error": f"AI service error: {exc.message}"}, 500)
         except Exception:
             logger.exception("API chat failed.")
             return _cors_json({"error": "Internal error"}, 500)
@@ -930,6 +1006,17 @@ def create_mcp(config: Config) -> FastMCP:
         """
         if request.method == "OPTIONS":
             return _cors_json({})
+
+        if not _chat_model_valid:
+            logger.warning(
+                "Chat stream request rejected: chat_model_valid=False (%s).",
+                _chat_model_error,
+                extra={"event": "chat_rejected_misconfigured", "error": _chat_model_error},
+            )
+            return _cors_json(
+                {"error": f"Chat is misconfigured: {_chat_model_error or 'invalid model'}"},
+                503,
+            )
 
         req = await _prepare_chat_request(request)
         if isinstance(req, JSONResponse):
@@ -1080,6 +1167,18 @@ def create_mcp(config: Config) -> FastMCP:
                 logger.warning("Anthropic rate limit hit in chat stream.", extra={"event": "chat_rate_limit"})
                 yield ServerSentEvent(
                     data=json.dumps({"error": "Rate limit reached — please wait a moment and try again."}),
+                    event="error",
+                )
+            except (anthropic.NotFoundError, anthropic.BadRequestError) as exc:
+                logger.exception("Anthropic config error in chat stream.")
+                yield ServerSentEvent(
+                    data=json.dumps({"error": f"AI service config error: {exc.message}"}),
+                    event="error",
+                )
+            except (anthropic.APIConnectionError, anthropic.InternalServerError) as exc:
+                logger.exception("Anthropic upstream unreachable in chat stream.")
+                yield ServerSentEvent(
+                    data=json.dumps({"error": f"AI service unreachable: {exc.message}"}),
                     event="error",
                 )
             except anthropic.APIError as exc:
@@ -1488,6 +1587,7 @@ def run_server() -> None:
         has_api_key,
         extra={"event": "startup", "provider": "anthropic", "model": chat_model},
     )
+    _probe_chat_model(chat_model)
     logger.info(
         "Embedding model: sentence-transformers/all-mpnet-base-v2 (ONNX Runtime, local inference)",
         extra={"event": "startup"},

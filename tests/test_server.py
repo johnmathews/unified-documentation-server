@@ -203,6 +203,9 @@ class TestHealthEndpoint:
         assert "last_ingestion" in body
         # Initially None until the ingester completes its first cycle.
         assert body["last_ingestion"] is None or isinstance(body["last_ingestion"], dict)
+        assert "chat_model_valid" in body
+        assert isinstance(body["chat_model_valid"], bool)
+        assert "chat_model_error" in body
         # Verify per-source structure if sources exist
         if body["sources"]:
             src = body["sources"][0]
@@ -239,6 +242,25 @@ class TestHealthEndpoint:
         assert body["last_ingestion"]["duration_s"] == 4.2
         assert body["last_ingestion"]["rss_at_end_mb"] == 240.0
         assert body["last_ingestion"]["flush_count"] == 3
+
+    def test_health_reflects_chat_model_invalid(self, app) -> None:
+        """/health should expose chat_model_valid=False when probe failed."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        original_valid = server_module._chat_model_valid
+        original_error = server_module._chat_model_error
+        try:
+            server_module._chat_model_valid = False
+            server_module._chat_model_error = "model: claude-bogus-1 not found"
+            response = client.get("/health")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["chat_model_valid"] is False
+            assert "claude-bogus-1" in body["chat_model_error"]
+        finally:
+            server_module._chat_model_valid = original_valid
+            server_module._chat_model_error = original_error
 
     def test_health_includes_last_checked(self, app) -> None:
         """GET /health should include last_checked from ingester check times."""

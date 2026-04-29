@@ -38,6 +38,12 @@ Each source entry includes:
 - `last_indexed` -- timestamp of the most recent content change that triggered re-indexing
 - `last_checked` -- timestamp of the most recent successful sync check (updates every poll cycle, even when no content changed)
 
+The top-level response also includes:
+
+- `last_ingestion` -- diagnostic metrics from the most recent ingestion cycle, populated only after the first cycle completes. Fields: `completed_at` (ISO timestamp), `duration_s` (total cycle wall time), `rss_at_start_mb` / `rss_at_end_mb` (process peak RSS observed at cycle boundaries; monotonically non-decreasing because `ru_maxrss` is a lifetime peak), `rss_growth_mb` (delta), `flush_count`, `flush_total_s`, `flush_max_s` (per-batch upsert+embed timing).
+- `chat_model_valid` -- `false` if the configured `DOCSERVER_CHAT_MODEL` was rejected by the Anthropic API at startup (e.g. invalid alias). When `false`, both `/api/chat` and `/api/chat/stream` short-circuit with HTTP 503 and the webapp can disable its chat UI proactively. The probe is skipped if `ANTHROPIC_API_KEY` is unset, leaving this field `true` (validity is assumed).
+- `chat_model_error` -- the Anthropic error message that caused the probe to fail, or `null`.
+
 Returns **503** with `{"status": "error"}` if the knowledge base is unreachable.
 
 ### Rescan Endpoint

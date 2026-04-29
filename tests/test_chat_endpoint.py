@@ -29,12 +29,19 @@ def _reset_anthropic_client_cache():
     mocks. The server caches a single client for the lifetime of the
     process, so without this reset the first test's cached mock would be
     reused by subsequent tests, bypassing their patches.
+
+    Also resets the chat-model probe state so a test that flips it to
+    invalid does not bleed into later tests.
     """
     server_module._anthropic_client = None
     server_module._anthropic_client_class = None
+    server_module._chat_model_valid = True
+    server_module._chat_model_error = None
     yield
     server_module._anthropic_client = None
     server_module._anthropic_client_class = None
+    server_module._chat_model_valid = True
+    server_module._chat_model_error = None
 
 
 @pytest.fixture
@@ -175,7 +182,7 @@ class TestChatEndpoint:
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     def test_simple_reply(self, client):
         """Chat returns a reply without tool use."""
-        patcher, _mock_client = _patch_anthropic([
+        patcher, mock_client = _patch_anthropic([
             _FakeResponse(content=[_make_text_block("Hello!")]),
         ])
         with patcher:
@@ -189,6 +196,13 @@ class TestChatEndpoint:
         body = response.json()
         assert body["reply"] == "Hello!"
         assert "conversation_id" in body
+        # The model passed to the Anthropic SDK must match the configured
+        # default. This guard would have caught the 2026-04-25 outage where
+        # CHAT_MODEL was set to a non-existent alias.
+        assert (
+            mock_client.messages.create.call_args.kwargs["model"]
+            == server_module.CHAT_MODEL
+        )
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     def test_with_tool_use(self, client):
@@ -241,6 +255,69 @@ class TestChatEndpoint:
 
         assert response.status_code == 429
         assert "Rate limit" in response.json()["error"]
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    def test_chat_returns_503_when_model_invalid(self, client):
+        """When the startup probe marked the chat model invalid, /api/chat short-circuits with 503."""
+        server_module._chat_model_valid = False
+        server_module._chat_model_error = "model: claude-bogus-1 not found"
+
+        response = client.post(
+            "/api/chat",
+            json={"message": "hi"},
+            headers={"Content-Type": "application/json"},
+        )
+
+        assert response.status_code == 503
+        body = response.json()
+        assert "misconfigured" in body["error"].lower()
+        assert "claude-bogus-1" in body["error"]
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    def test_not_found_error_returns_500(self, client):
+        """Anthropic NotFoundError on chat call returns 500 (server config error), not 502."""
+        import anthropic as anthropic_mod
+
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.headers = {}
+        mock_client.messages.create.side_effect = anthropic_mod.NotFoundError(
+            message="model: claude-bogus-1 not found",
+            response=mock_resp,
+            body=None,
+        )
+
+        with patch("docserver.server.anthropic.Anthropic", return_value=mock_client):
+            response = client.post(
+                "/api/chat",
+                json={"message": "hello"},
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 500
+        assert "config error" in response.json()["error"].lower()
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+    def test_connection_error_returns_502(self, client):
+        """Anthropic APIConnectionError returns 502 (true gateway failure)."""
+        import anthropic as anthropic_mod
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = anthropic_mod.APIConnectionError(
+            message="connection refused",
+            request=MagicMock(),
+        )
+
+        with patch("docserver.server.anthropic.Anthropic", return_value=mock_client):
+            response = client.post(
+                "/api/chat",
+                json={"message": "hello"},
+                headers={"Content-Type": "application/json"},
+            )
+
+        assert response.status_code == 502
+        assert "unreachable" in response.json()["error"].lower()
 
     def test_options_returns_cors(self, client):
         response = client.options("/api/chat")
@@ -320,7 +397,7 @@ class TestChatStreamEndpoint:
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     def test_simple_stream(self, client):
         """Stream returns status and reply events."""
-        patcher, _ = _patch_anthropic([
+        patcher, mock_client = _patch_anthropic([
             _FakeResponse(content=[_make_text_block("Streamed answer.")]),
         ])
         with patcher:
@@ -337,6 +414,11 @@ class TestChatStreamEndpoint:
         event_types = [e["event"] for e in events]
         assert "status" in event_types
         assert "reply" in event_types
+        # Same guard as in test_simple_reply.
+        assert (
+            mock_client.messages.create.call_args.kwargs["model"]
+            == server_module.CHAT_MODEL
+        )
 
         reply_event = next(e for e in events if e["event"] == "reply")
         reply_data = json.loads(reply_event["data"])

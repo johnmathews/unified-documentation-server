@@ -44,8 +44,8 @@ services:
     # so it cannot starve other services on the host (it restarts via
     # unless-stopped). Do NOT raise this without also raising the infra VM
     # RAM — on a 1.95 GB host, larger limits risk host-wide memory starvation.
-    mem_limit: 512m
-    mem_reservation: 200m
+    mem_limit: 1024m
+    mem_reservation: 1024m
     ports:
       - "8085:8080"
     volumes:

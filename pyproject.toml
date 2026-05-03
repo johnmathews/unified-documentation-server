@@ -5,14 +5,14 @@ description = "MCP server that indexes documentation from git repos and serves i
 requires-python = ">=3.13"
 dependencies = [
     "mcp[cli]>=1.22.0,<2",
-    "chromadb>=1.5.0,<2",
-    "onnxruntime>=1.17.0,<2",
-    "tokenizers>=0.20.0",
-    "huggingface-hub>=0.20.0",
+    "chromadb>=1.5.8,<2",
+    "onnxruntime>=1.25.1,<2",
+    "tokenizers>=0.23.1",
+    "huggingface-hub>=1.13.0",
     "gitpython>=3.1.41,<4",
     "pyyaml>=6.0",
     "apscheduler>=3.10.0,<4",
-    "anthropic>=0.40.0",
+    "anthropic>=0.97.0",
 ]
 
 [dependency-groups]
@@ -20,7 +20,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=6.0",
-    "ruff>=0.15.7",
+    "ruff>=0.15.12",
 ]
 
 [build-system]

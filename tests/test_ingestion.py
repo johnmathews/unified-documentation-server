@@ -1847,9 +1847,7 @@ class TestRemoteSyncIntegration:
         assert stats2["test-remote"]["skipped"] == 0
         assert stats2["test-remote"]["errors"] == 0
 
-    def test_short_circuit_emits_skip_unchanged_log(
-        self, tmp_path: Path, kb, caplog
-    ) -> None:
+    def test_short_circuit_emits_skip_unchanged_log(self, tmp_path: Path, kb, caplog) -> None:
         """The short-circuit should emit a `skip_unchanged` event so operators
         can see in the logs which sources were skipped."""
         import logging
@@ -1869,9 +1867,7 @@ class TestRemoteSyncIntegration:
         with caplog.at_level(logging.INFO, logger="docserver.ingestion"):
             ingester.run_once()
 
-        skip_events = [
-            r for r in caplog.records if getattr(r, "event", None) == "skip_unchanged"
-        ]
+        skip_events = [r for r in caplog.records if getattr(r, "event", None) == "skip_unchanged"]
         assert len(skip_events) == 1
         assert skip_events[0].source == "test-remote"
 

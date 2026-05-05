@@ -102,6 +102,7 @@ Key log events (filter with `grep '"event":'`):
 | `ingestion_start` | `sources` | Ingestion cycle beginning |
 | `sync_start` / `sync_done` | `source`, `changed` | Git sync per source |
 | `sync_unchanged` | `source`, `head` | Sync found no new commits (logs HEAD sha for diagnosis) |
+| `skip_unchanged` | `source` | Remote source's HEAD did not advance — file walk and KB reads were skipped entirely. Local sources never emit this event. |
 | `fetch_info` | `source` | Per-ref fetch results with flags (HEAD_UPTODATE, FAST_FORWARD, etc.) |
 | `origin_url_update` | `source` | Clone's origin URL was updated to match current config (e.g., after token rotation) |
 | `clone_start` / `clone_done` | `source` | First-time clone of remote repo |
@@ -216,7 +217,7 @@ If you push changes to a source repo but the docserver logs keep showing `"All N
    ```bash
    docker exec unified-documentation-server rm -rf "/data/clones/<source-name>"
    ```
-   The next ingestion cycle (within 5 minutes) will re-clone and re-index.
+   The next ingestion cycle (within 30 minutes by default — see `DOCSERVER_POLL_INTERVAL`) will re-clone and re-index.
 
 ### Search returns no results
 
@@ -368,7 +369,7 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOCSERVER_POLL_INTERVAL` | `300` | How often (in seconds) the server polls sources for changes. Each cycle syncs remote repos (git fetch), checks local directories for modified files, and re-indexes anything that changed. Default is 300 (5 minutes). |
+| `DOCSERVER_POLL_INTERVAL` | `1800` | How often (in seconds) the server polls sources for changes. Each cycle syncs remote repos (git fetch) and checks local directories for modified files. Remote sources whose HEAD did not advance skip the file walk entirely (logged as `skip_unchanged`), so idle cycles are cheap. Default is 1800 (30 minutes). |
 | `DOCSERVER_DATA_DIR` | `/data` | Root directory for all persistent data: SQLite database, ChromaDB vector store, git clones of remote repos, and cached embedding model. Mount a Docker volume here. |
 | `DOCSERVER_CONFIG` | `/config/sources.yaml` | Path to the YAML config file that defines which repositories to index. Mount your config file to this path. |
 | `DOCSERVER_HOST` | `0.0.0.0` | Server bind address. Default binds to all interfaces inside the container. |

@@ -56,7 +56,7 @@ class RepoSource:
 class Config:
     sources: list[RepoSource]
     data_dir: str = "/data"
-    poll_interval_seconds: int = 30
+    poll_interval_seconds: int = 1800
     server_host: str = "0.0.0.0"
     server_port: int = 8080
     # When chroma_host is set, KnowledgeBase uses chromadb.HttpClient against
@@ -177,7 +177,7 @@ def load_config(path: str | None = None) -> Config:
     poll_interval_seconds = int(
         os.environ.get(
             "DOCSERVER_POLL_INTERVAL",
-            str(raw.get("poll_interval", 300)),
+            str(raw.get("poll_interval", 1800)),
         )
     )
 

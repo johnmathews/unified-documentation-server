@@ -48,15 +48,16 @@ The ingestion layer manages git repositories and converts markdown files into se
   - **Code fences**: Everything between ` ``` ` markers stays in one block; headings inside code fences are ignored
   - **Oversized blocks**: Blocks larger than the target size are emitted whole rather than split mid-content
 
-- **Ingester**: Orchestrates the full ingestion cycle via APScheduler, running on a timer controlled by the `poll_interval` setting (default: 300 seconds / 5 minutes). This is how often the server checks source repositories for new or changed documentation. On each tick:
+- **Ingester**: Orchestrates the full ingestion cycle via APScheduler, running on a timer controlled by the `poll_interval` setting (default: 1800 seconds / 30 minutes). This is how often the server checks source repositories for new or changed documentation. On each tick:
   1. Clean up orphaned sources — detects renames via URL matching before deleting (see below)
   2. Sync all repos in parallel using a thread pool (clone on first run, then fetch + hard reset to match remote)
-  3. Enumerate files matching glob patterns (default: `**/*.md`). Add `**/*.pdf` to include PDFs. Root-level `README.md` files are always included even when custom patterns are specified. Files matching `exclude_patterns` are removed after inclusion matching.
-  4. Bulk-fetch git creation dates for all files in a single `git log` call (with per-file fallback for renamed files)
-  5. Compare SHA-256 content hash against stored hash — skip unchanged files
-  6. Parse and chunk changed files
-  7. Batch-upsert into the knowledge base (SQLite via `executemany` in one transaction, ChromaDB in capped batches of 64 to leverage the embedding model's batch_size=32)
-  8. Delete stale documents that no longer exist in the repo
+  3. **Short-circuit when remote HEAD is unchanged**: if `git fetch` reports `HEAD_UPTODATE` for a remote source, the ingester logs `skip_unchanged` and skips the entire per-source pipeline (no file walk, no SQLite reads, no `git log` for creation dates). This makes idle cycles essentially free — only sources whose HEAD actually advanced incur indexing work. **Local sources are not short-circuited** because they have no HEAD to compare; they always proceed to the file walk and rely on content-hash comparison (step 6) to detect edits.
+  4. Enumerate files matching glob patterns (default: `**/*.md`). Add `**/*.pdf` to include PDFs. Root-level `README.md` files are always included even when custom patterns are specified. Files matching `exclude_patterns` are removed after inclusion matching.
+  5. Bulk-fetch git creation dates for all files in a single `git log` call (with per-file fallback for renamed files)
+  6. Compare SHA-256 content hash against stored hash — skip unchanged files
+  7. Parse and chunk changed files
+  8. Batch-upsert into the knowledge base (SQLite via `executemany` in one transaction, ChromaDB in capped batches of 64 to leverage the embedding model's batch_size=32)
+  9. Delete stale documents that no longer exist in the repo
 
   **Performance optimizations:**
   - **Parallel source sync**: Git fetch/pull for multiple sources runs concurrently via `ThreadPoolExecutor` (up to 4 workers). Ingestion (KB writes) remains sequential since SQLite and ChromaDB are not thread-safe.

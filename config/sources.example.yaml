@@ -40,8 +40,10 @@ sources:
   #     - "docs/**/*.md"
   #     - "journal/**/*.md"
 
-# Polling interval in seconds (default: 300 = 5 minutes)
-poll_interval: 300
+# Polling interval in seconds (default: 1800 = 30 minutes).
+# Remote sources whose HEAD did not advance skip the file walk entirely,
+# so a 30-minute cadence keeps log noise and CPU low.
+poll_interval: 1800
 
 # Where to store the SQLite database and ChromaDB data
 data_dir: "/data"

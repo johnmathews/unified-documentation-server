@@ -1819,8 +1819,10 @@ class TestRemoteSyncIntegration:
         )
         assert kb.get_document("test-remote:docs/to-delete.md") is None
 
-    def test_no_changes_returns_all_skipped(self, tmp_path: Path, kb) -> None:
-        """Running twice with no changes should skip all files on second run."""
+    def test_no_changes_short_circuits_file_walk(self, tmp_path: Path, kb) -> None:
+        """When a remote's HEAD did not advance, the second run should skip the
+        file walk entirely — no files counted, no upserts, no per-file skip
+        accounting."""
         bare_path = tmp_path / "remote.git"
         _init_bare_repo(bare_path)
 
@@ -1836,9 +1838,80 @@ class TestRemoteSyncIntegration:
         assert stats1["test-remote"]["new"] >= 1
 
         stats2 = ingester.run_once()
+        # Short-circuit: the per-source dict is initialized with zeros and the
+        # loop body returns before any file accounting happens.
         assert stats2["test-remote"]["new"] == 0
         assert stats2["test-remote"]["modified"] == 0
-        assert stats2["test-remote"]["skipped"] >= 1
+        assert stats2["test-remote"]["upserted"] == 0
+        assert stats2["test-remote"]["files"] == 0
+        assert stats2["test-remote"]["skipped"] == 0
+        assert stats2["test-remote"]["errors"] == 0
+
+    def test_short_circuit_emits_skip_unchanged_log(
+        self, tmp_path: Path, kb, caplog
+    ) -> None:
+        """The short-circuit should emit a `skip_unchanged` event so operators
+        can see in the logs which sources were skipped."""
+        import logging
+
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+
+        config = Config(
+            sources=[
+                RepoSource(name="test-remote", path=str(bare_path), is_remote=True, branch="main")
+            ],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        ingester.run_once()  # initial clone
+
+        with caplog.at_level(logging.INFO, logger="docserver.ingestion"):
+            ingester.run_once()
+
+        skip_events = [
+            r for r in caplog.records if getattr(r, "event", None) == "skip_unchanged"
+        ]
+        assert len(skip_events) == 1
+        assert skip_events[0].source == "test-remote"
+
+        # The "Found N files" log MUST NOT fire on the short-circuit cycle.
+        files_found_events = [
+            r
+            for r in caplog.records
+            if getattr(r, "event", None) == "files_found"
+            and getattr(r, "source", None) == "test-remote"
+        ]
+        assert files_found_events == []
+
+    def test_local_source_not_short_circuited(self, tmp_path: Path, kb) -> None:
+        """Local sources always return changed=False from sync; they MUST NOT be
+        short-circuited because content-hash comparison is their only change
+        detection mechanism."""
+        source_dir = tmp_path / "local-src"
+        source_dir.mkdir()
+        (source_dir / "doc.md").write_text("# initial\n")
+
+        config = Config(
+            sources=[RepoSource(name="local-src", path=str(source_dir), is_remote=False)],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+
+        # First run indexes everything.
+        stats1 = ingester.run_once()
+        assert stats1["local-src"]["new"] >= 1
+
+        # Mutate the file in-place (no git, no HEAD movement).
+        (source_dir / "doc.md").write_text("# modified content here\n")
+
+        # Second run must still walk the files and detect the modification —
+        # the short-circuit must not apply to local sources.
+        stats2 = ingester.run_once()
+        assert stats2["local-src"]["modified"] >= 1, (
+            f"Local source modification was missed — short-circuit must not apply to local sources. "
+            f"Stats: {stats2['local-src']}"
+        )
 
     def test_origin_url_updated_when_config_changes(self, tmp_path: Path, kb) -> None:
         """If the source URL changes in config (e.g. token rotation), the clone's

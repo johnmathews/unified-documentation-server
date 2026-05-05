@@ -95,7 +95,7 @@ configuration.
   "status": "healthy",
   "total_sources": 3,
   "total_chunks": 542,
-  "poll_interval_seconds": 300,
+  "poll_interval_seconds": 1800,
   "sources": [ /* per-source health */ ],
   "last_ingestion": {
     "completed_at": "2026-04-29T17:25:00+00:00",
@@ -225,7 +225,7 @@ sources:
    path: "https://github.com/user/repo.git"
    branch: "main"
 
-poll_interval: 300 # Seconds between index cycles
+poll_interval: 1800 # Seconds between index cycles (default: 1800 = 30 min)
 data_dir: "/data" # Persistent storage path
 ```
 
@@ -235,7 +235,7 @@ data_dir: "/data" # Persistent storage path
 | --------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------- |
 | `DOCSERVER_CONFIG`                | `/config/sources.yaml` | Path to config file                                                                                |
 | `DOCSERVER_DATA_DIR`              | `/data`                | Persistent storage directory                                                                       |
-| `DOCSERVER_POLL_INTERVAL`         | `300`                  | Polling interval in seconds                                                                        |
+| `DOCSERVER_POLL_INTERVAL`         | `1800`                 | Polling interval in seconds (default 30 min). Remote sources whose HEAD did not advance skip the file walk on each cycle. |
 | `DOCSERVER_HOST`                  | `0.0.0.0`              | Server bind address                                                                                |
 | `DOCSERVER_PORT`                  | `8080`                 | Server port                                                                                        |
 | `DOCSERVER_LOG_FORMAT`            | `json`                 | Log format (`json` or `text`)                                                                      |

@@ -65,7 +65,10 @@ services:
     environment:
       # How often (seconds) the server checks sources for new/changed docs.
       # Each cycle: git fetch for remote repos, content-hash check for local dirs.
-      - DOCSERVER_POLL_INTERVAL=300
+      # Remote sources whose HEAD did not advance skip the file walk entirely,
+      # so a 30-minute cadence keeps log noise and CPU low while staying
+      # responsive enough for personal documentation.
+      - DOCSERVER_POLL_INTERVAL=1800
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       # Override the default chat LLM. Anthropic does NOT publish a -latest
       # alias for Opus 4 — set this to a version-pinned ID, e.g.

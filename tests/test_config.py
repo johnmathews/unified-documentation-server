@@ -14,7 +14,7 @@ def test_load_config_defaults_when_no_file():
     assert isinstance(config, Config)
     assert config.sources == []
     assert config.data_dir == "/data"
-    assert config.poll_interval_seconds == 300
+    assert config.poll_interval_seconds == 1800
     assert config.server_host == "0.0.0.0"
     assert config.server_port == 8080
     # chroma_host defaults to None — KnowledgeBase falls back to PersistentClient.

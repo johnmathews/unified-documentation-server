@@ -1293,6 +1293,20 @@ class Ingester:
                 source_stats["errors"] += 1
                 continue
 
+            # Short-circuit when a remote source's HEAD did not advance.
+            # _sync_remote returns False only when fetch reported HEAD_UPTODATE
+            # and no files in the working tree could have changed. Local
+            # sources always return False from _sync_local and rely on the
+            # per-file content-hash comparison below, so they MUST NOT be
+            # short-circuited here.
+            if source.is_remote and sync_results.get(source.name) is False:
+                logger.info(
+                    "HEAD unchanged for '%s', skipping file walk",
+                    source.name,
+                    extra={"event": "skip_unchanged", "source": source.name},
+                )
+                continue
+
             manager = self._managers.get(source.name)
             if manager is None:
                 continue

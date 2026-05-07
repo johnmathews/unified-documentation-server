@@ -1847,6 +1847,80 @@ class TestRemoteSyncIntegration:
         assert stats2["test-remote"]["skipped"] == 0
         assert stats2["test-remote"]["errors"] == 0
 
+    def test_force_bypasses_head_unchanged_short_circuit(self, tmp_path: Path, kb) -> None:
+        """force=True must walk files even when HEAD hasn't advanced —
+        otherwise an operator triggering a force-rescan to re-embed (e.g.
+        after an embedding-model upgrade or a corrupt index) gets nothing
+        because the short-circuit eats the request silently.
+        """
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+
+        config = Config(
+            sources=[
+                RepoSource(
+                    name="test-remote",
+                    path=str(bare_path),
+                    is_remote=True,
+                    branch="main",
+                )
+            ],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+
+        stats1 = ingester.run_once()
+        n_initial_files = stats1["test-remote"]["files"]
+        assert n_initial_files >= 1, "fixture must seed at least one file"
+
+        # Without force, the short-circuit fires (verified separately above).
+        # With force=True and the same HEAD, the file walk MUST happen and
+        # every file should be re-upserted via the per-file content-hash
+        # check (which honours force at ingestion.py:1471).
+        stats2 = ingester.run_once(force=True)
+        assert stats2["test-remote"]["files"] == n_initial_files
+        # force=True re-upserts every file's chunks regardless of whether
+        # content changed; "new" stays 0 because they exist in SQLite, but
+        # "upserted" must be > 0 to prove the work actually happened.
+        assert stats2["test-remote"]["upserted"] > 0
+        assert stats2["test-remote"]["errors"] == 0
+
+    def test_force_bypass_logs_no_skip_unchanged(self, tmp_path: Path, kb, caplog) -> None:
+        """When force=True and the source would otherwise have been
+        short-circuited, the skip_unchanged log event MUST NOT fire — its
+        absence is the operator's signal that force took effect."""
+        import logging
+
+        bare_path = tmp_path / "remote.git"
+        _init_bare_repo(bare_path)
+
+        config = Config(
+            sources=[
+                RepoSource(
+                    name="test-remote",
+                    path=str(bare_path),
+                    is_remote=True,
+                    branch="main",
+                )
+            ],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        ingester.run_once()  # initial clone
+
+        with caplog.at_level(logging.INFO, logger="docserver.ingestion"):
+            ingester.run_once(force=True)
+
+        skip_events = [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "skip_unchanged"
+            and getattr(r, "source", None) == "test-remote"
+        ]
+        assert skip_events == [], (
+            "force=True must bypass the HEAD-unchanged short-circuit, "
+            "but skip_unchanged was logged"
+        )
+
     def test_short_circuit_emits_skip_unchanged_log(self, tmp_path: Path, kb, caplog) -> None:
         """The short-circuit should emit a `skip_unchanged` event so operators
         can see in the logs which sources were skipped."""

@@ -1299,7 +1299,19 @@ class Ingester:
             # sources always return False from _sync_local and rely on the
             # per-file content-hash comparison below, so they MUST NOT be
             # short-circuited here.
-            if source.is_remote and sync_results.get(source.name) is False:
+            #
+            # ``force=True`` (e.g. operator-triggered /rescan or reindex MCP
+            # tool with force) must bypass this short-circuit, otherwise force
+            # is silently a no-op for remote sources whose HEAD has not
+            # advanced — operator intent is "re-embed everything", which
+            # requires walking the files to reach the per-file
+            # content-hash check at the bottom of the loop where ``force``
+            # is honoured.
+            if (
+                not force
+                and source.is_remote
+                and sync_results.get(source.name) is False
+            ):
                 logger.info(
                     "HEAD unchanged for '%s', skipping file walk",
                     source.name,

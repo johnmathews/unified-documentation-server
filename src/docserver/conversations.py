@@ -8,12 +8,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 logger = logging.getLogger(__name__)
+
+
+# Default cap on retained conversations. Each row stores the full message
+# list as JSON, so an unbounded table grows linearly with chat usage and
+# eventually consumes meaningful disk on the data volume. Single-user
+# homelab scale fits well under 1000; long-running deployments should
+# tune via the constructor or DOCSERVER_MAX_CONVERSATIONS env var.
+DEFAULT_MAX_CONVERSATIONS = 1000
 
 
 class ConversationSummary(TypedDict):
@@ -48,11 +57,27 @@ def _generate_title(messages: list[dict[str, str]]) -> str:
 class ConversationStore:
     """SQLite-backed conversation storage."""
 
-    def __init__(self, data_dir: str) -> None:
-        import os
-
+    def __init__(
+        self,
+        data_dir: str,
+        *,
+        max_conversations: int | None = None,
+    ) -> None:
         os.makedirs(data_dir, exist_ok=True)
         self.db_path = os.path.join(data_dir, "conversations.db")
+        if max_conversations is None:
+            env_val = os.environ.get("DOCSERVER_MAX_CONVERSATIONS")
+            try:
+                max_conversations = int(env_val) if env_val else DEFAULT_MAX_CONVERSATIONS
+            except ValueError:
+                logger.warning(
+                    "Invalid DOCSERVER_MAX_CONVERSATIONS=%r; using default %d.",
+                    env_val,
+                    DEFAULT_MAX_CONVERSATIONS,
+                    extra={"event": "conversations_max_invalid"},
+                )
+                max_conversations = DEFAULT_MAX_CONVERSATIONS
+        self.max_conversations = max(1, max_conversations)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -97,13 +122,38 @@ class ConversationStore:
                     json.dumps(messages),
                 ),
             )
+            pruned = self._prune_to_cap(conn)
         logger.info(
-            "Created conversation %s: %s",
+            "Created conversation %s: %s%s",
             conv_id,
             title,
-            extra={"event": "conversation_create", "conversation_id": conv_id},
+            f" (pruned {pruned} oldest)" if pruned else "",
+            extra={
+                "event": "conversation_create",
+                "conversation_id": conv_id,
+                "pruned": pruned,
+            },
         )
         return conv_id
+
+    def _prune_to_cap(self, conn: sqlite3.Connection) -> int:
+        """Delete any rows beyond ``self.max_conversations``, dropping the
+        oldest first (by ``updated_at``). Returns the number of rows
+        deleted. Called from ``create()`` so the cap is enforced at the
+        only path that adds rows.
+        """
+        # SQLite supports `LIMIT -1 OFFSET N` for "everything after the
+        # first N rows" — used here to identify the rows beyond the cap
+        # in the inverse-by-updated_at ordering, and delete them by id.
+        cursor = conn.execute(
+            "DELETE FROM conversations WHERE id IN ("
+            "  SELECT id FROM conversations "
+            "  ORDER BY updated_at DESC, created_at DESC "
+            "  LIMIT -1 OFFSET ?"
+            ")",
+            (self.max_conversations,),
+        )
+        return cursor.rowcount
 
     def update(
         self,

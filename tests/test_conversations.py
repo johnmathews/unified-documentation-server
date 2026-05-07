@@ -161,3 +161,90 @@ class TestConversationStore:
         conv = store2.get(conv_id)
         assert conv is not None
         assert conv["title"] == "What is m3?"
+
+
+class TestRowCap:
+    """The store caps how many conversations are retained so the SQLite
+    file doesn't grow forever. The cap is enforced on insert; oldest rows
+    (by updated_at) are pruned first."""
+
+    def test_default_cap_used_when_unspecified(self, tmp_path):
+        store = ConversationStore(str(tmp_path))
+        from docserver.conversations import DEFAULT_MAX_CONVERSATIONS
+
+        assert store.max_conversations == DEFAULT_MAX_CONVERSATIONS
+
+    def test_explicit_cap_overrides_default(self, tmp_path):
+        store = ConversationStore(str(tmp_path), max_conversations=42)
+        assert store.max_conversations == 42
+
+    def test_env_var_overrides_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOCSERVER_MAX_CONVERSATIONS", "7")
+        store = ConversationStore(str(tmp_path))
+        assert store.max_conversations == 7
+
+    def test_invalid_env_var_falls_back_to_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOCSERVER_MAX_CONVERSATIONS", "not-a-number")
+        store = ConversationStore(str(tmp_path))
+        from docserver.conversations import DEFAULT_MAX_CONVERSATIONS
+
+        assert store.max_conversations == DEFAULT_MAX_CONVERSATIONS
+
+    def test_cap_under_one_clamped(self, tmp_path):
+        """A cap of 0 or negative would mean 'delete everything on insert'.
+        We clamp to 1 instead — a degenerate but at least usable store."""
+        store = ConversationStore(str(tmp_path), max_conversations=0)
+        assert store.max_conversations == 1
+
+    def test_insert_under_cap_does_not_prune(self, tmp_path, sample_messages):
+        store = ConversationStore(str(tmp_path), max_conversations=5)
+        ids = [store.create(sample_messages) for _ in range(3)]
+        assert len(store.list_all()) == 3
+        for cid in ids:
+            assert store.get(cid) is not None
+
+    def test_insert_at_cap_prunes_oldest(self, tmp_path, sample_messages):
+        """When the cap is N and an N+1th conversation is created, the
+        oldest (by updated_at) is dropped."""
+        import time
+
+        store = ConversationStore(str(tmp_path), max_conversations=3)
+        first = store.create(sample_messages)
+        time.sleep(0.01)
+        second = store.create(sample_messages)
+        time.sleep(0.01)
+        third = store.create(sample_messages)
+        time.sleep(0.01)
+        fourth = store.create(sample_messages)
+
+        assert store.get(first) is None
+        for cid in (second, third, fourth):
+            assert store.get(cid) is not None
+        assert len(store.list_all(limit=100)) == 3
+
+    def test_repeated_inserts_keep_count_stable(self, tmp_path, sample_messages):
+        """Inserting many conversations with a small cap should leave the
+        table at exactly cap rows."""
+        store = ConversationStore(str(tmp_path), max_conversations=5)
+        for _ in range(50):
+            store.create(sample_messages)
+        assert len(store.list_all(limit=1000)) == 5
+
+    def test_pruning_uses_updated_at_not_created_at(self, tmp_path, sample_messages):
+        """A conversation that was created early but updated recently must
+        survive pruning ahead of conversations that were never touched."""
+        import time
+
+        store = ConversationStore(str(tmp_path), max_conversations=2)
+        old = store.create(sample_messages)
+        time.sleep(0.01)
+        middle = store.create(sample_messages)
+        time.sleep(0.01)
+        # Touch the OLD conversation so updated_at advances.
+        store.update(old, [*sample_messages, {"role": "user", "content": "again"}])
+        time.sleep(0.01)
+        newest = store.create(sample_messages)
+
+        assert store.get(old) is not None, "recently-updated conv should be retained"
+        assert store.get(middle) is None, "least-recently-updated conv should be pruned"
+        assert store.get(newest) is not None

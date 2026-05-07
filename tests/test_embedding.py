@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from docserver.embedding import OnnxEmbeddingFunction, _default_model_dir
+from docserver.embedding import (
+    _DEFAULT_EMBEDDING_BATCH_SIZE,
+    OnnxEmbeddingFunction,
+    _default_model_dir,
+)
 
 
 @pytest.fixture(scope="module")
@@ -232,3 +236,78 @@ class TestImportErrors:
             pytest.raises(ImportError, match="tokenizers is required"),
         ):
             OnnxEmbeddingFunction.__init__(MagicMock(), model_dir="/tmp")
+
+
+class TestBatchSize:
+    """The embedding function batches chunks into ONNX inference calls;
+    batch size controls the per-call transient activation tensor and
+    therefore the worker's peak RSS. Default 8 keeps the worker comfortably
+    under the 768 MB cgroup limit on the infra VM; raisable via env var
+    for hosts with more headroom."""
+
+    def test_default_batch_size_is_safe_for_768m_cgroup(self):
+        """If this changes, the journal entry on infra OOM mitigation also
+        needs updating — 8 was profiled against the 768m cgroup limit."""
+        assert _DEFAULT_EMBEDDING_BATCH_SIZE == 8
+
+    def test_default_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("DOCSERVER_EMBEDDING_BATCH_SIZE", raising=False)
+        ef = OnnxEmbeddingFunction()
+        assert ef._batch_size == _DEFAULT_EMBEDDING_BATCH_SIZE
+
+    def test_env_var_override(self, monkeypatch):
+        monkeypatch.setenv("DOCSERVER_EMBEDDING_BATCH_SIZE", "16")
+        ef = OnnxEmbeddingFunction()
+        assert ef._batch_size == 16
+
+    def test_explicit_arg_wins_over_env(self, monkeypatch):
+        monkeypatch.setenv("DOCSERVER_EMBEDDING_BATCH_SIZE", "32")
+        ef = OnnxEmbeddingFunction(batch_size=4)
+        assert ef._batch_size == 4
+
+    def test_invalid_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("DOCSERVER_EMBEDDING_BATCH_SIZE", "not-a-number")
+        ef = OnnxEmbeddingFunction()
+        assert ef._batch_size == _DEFAULT_EMBEDDING_BATCH_SIZE
+
+    def test_zero_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("DOCSERVER_EMBEDDING_BATCH_SIZE", "0")
+        ef = OnnxEmbeddingFunction()
+        assert ef._batch_size == _DEFAULT_EMBEDDING_BATCH_SIZE
+
+    def test_negative_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("DOCSERVER_EMBEDDING_BATCH_SIZE", "-5")
+        ef = OnnxEmbeddingFunction()
+        assert ef._batch_size == _DEFAULT_EMBEDDING_BATCH_SIZE
+
+    def test_explicit_zero_clamped_to_one(self):
+        """Constructor arg of 0 (or negative) clamps to 1 — explicit caller
+        intent wins, but we won't crash."""
+        ef = OnnxEmbeddingFunction(batch_size=0)
+        assert ef._batch_size == 1
+        ef = OnnxEmbeddingFunction(batch_size=-3)
+        assert ef._batch_size == 1
+
+    def test_call_uses_configured_batch_size(self, ef):
+        """The configured batch size is what _forward iterates with."""
+        # Use the module-scoped fixture, override its batch size for the test.
+        original = ef._batch_size
+        try:
+            ef._batch_size = 3
+            captured: list[int] = []
+            real_forward = ef._forward
+
+            def spy(documents, batch_size=None):
+                if batch_size is None:
+                    batch_size = ef._batch_size
+                captured.append(batch_size)
+                return real_forward(documents, batch_size)
+
+            ef._forward = spy  # type: ignore[method-assign]
+            try:
+                _ = ef(["doc"] * 7)
+            finally:
+                ef._forward = real_forward  # type: ignore[method-assign]
+            assert captured == [3]
+        finally:
+            ef._batch_size = original

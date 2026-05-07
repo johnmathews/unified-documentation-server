@@ -381,6 +381,7 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 | `DOCSERVER_CHROMA_HOST` | `chroma` (in compose) | Hostname of the Chroma sidecar service. When set, the docserver and ingestion worker connect via `chromadb.HttpClient` instead of opening a `PersistentClient` directly. **Required in production** — two `PersistentClient` instances on the same on-disk path corrupt the store in Chroma 1.5.x. Leave unset for tests, which use `PersistentClient` against a tmp dir. |
 | `DOCSERVER_CHROMA_PORT` | `8000` | Port the Chroma sidecar listens on. Matches the `--port` argument to `chroma run`. |
 | `DOCSERVER_INGEST_NICE` | `10` (in supervisor) | Nice offset applied at the start of each ingestion worker subprocess. Lower CPU priority than the docserver process, so the request handlers stay responsive on a contended core. Set to `0` to disable. |
+| `DOCSERVER_EMBEDDING_BATCH_SIZE` | `8` | Chunks per ONNX forward pass. The transient activation tensor during inference is roughly proportional to `batch_size × seq_len × hidden_dim × num_layers × bytes_per_value`; on the infra VM (Linux x86-64, int8 quantised AVX2 model) we measured peaks of ~430 MB at batch=4, ~580 MB at batch=8, ~750 MB at batch=16, and ~810 MB at batch=32. The default of 8 keeps the worker comfortably under a 768 MB container `mem_limit`; raise on hosts with more headroom. Per-chunk inference time is roughly equal across batch=4..16. |
 
 Changes to environment variables require a container restart to take effect.
 

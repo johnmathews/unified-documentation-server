@@ -244,6 +244,7 @@ data_dir: "/data" # Persistent storage path
 | `DOCSERVER_CHROMA_HOST`           | unset (compose: `chroma`) | Hostname of the Chroma sidecar. **Required in production**; tests fall back to `PersistentClient` when unset. |
 | `DOCSERVER_CHROMA_PORT`           | `8000`                 | Port the Chroma sidecar listens on.                                                                |
 | `DOCSERVER_INGEST_NICE`           | `10` (set by supervisor) | Nice offset applied to each ingestion worker subprocess. Lower priority than the docserver process. |
+| `DOCSERVER_EMBEDDING_BATCH_SIZE`  | `8`                    | Chunks per ONNX inference call. Per-call activation memory scales with this — larger batches peak higher. 8 is sized for a 768 MB container cgroup; raise to 16/32 on hosts with more headroom. |
 
 See `docs/operations.md` for the full table including all options.
 

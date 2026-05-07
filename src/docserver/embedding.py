@@ -19,6 +19,19 @@ _MODEL_REVISION = "e8c3b32edf5434bc2275fc9bab85f82640a19130"
 _MAX_SEQ_LENGTH = 384
 _EMBEDDING_DIM = 768
 
+# Default chunks per ONNX inference call. The transient activation tensor
+# during a forward pass is roughly proportional to (batch_size * seq_len *
+# hidden_dim * num_layers * bytes_per_value). Empirically on the infra VM
+# (Linux x86-64, int8 quantised AVX2 model):
+#   batch=4   peak ~430 MB    batch=16  peak ~750 MB
+#   batch=8   peak ~580 MB    batch=32  peak ~810 MB
+# 8 keeps the worker comfortably under the 768 MB cgroup limit set on the
+# docserver container while preserving throughput (per-chunk inference time
+# is roughly equal across batch=4..16; batch=32 was actually slower under
+# memory pressure). Override via DOCSERVER_EMBEDDING_BATCH_SIZE on hosts
+# with more headroom.
+_DEFAULT_EMBEDDING_BATCH_SIZE = 8
+
 # Files needed from HuggingFace Hub.
 # Using int8-quantized AVX2 variant (~110MB vs ~436MB unoptimized) for x86-64 AMD/Intel.
 _HF_FILES = {
@@ -86,9 +99,15 @@ def _download_model_files(target_dir: Path) -> None:
 class OnnxEmbeddingFunction(EmbeddingFunction[Documents]):
     """ChromaDB-compatible embedding function using ONNX Runtime for all-mpnet-base-v2."""
 
-    def __init__(self, model_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        model_dir: str | Path | None = None,
+        *,
+        batch_size: int | None = None,
+    ) -> None:
         self._model_dir = Path(model_dir) if model_dir else _default_model_dir()
         self._model_ready = False
+        self._batch_size = self._resolve_batch_size(batch_size)
 
         try:
             import onnxruntime
@@ -102,6 +121,42 @@ class OnnxEmbeddingFunction(EmbeddingFunction[Documents]):
             self._Tokenizer = tokenizers.Tokenizer
         except ImportError as err:
             raise ImportError("tokenizers is required: pip install tokenizers") from err
+
+    @staticmethod
+    def _resolve_batch_size(explicit: int | None) -> int:
+        """Resolve the embedding batch size, in priority order:
+
+        1. ``batch_size`` constructor arg, if given.
+        2. ``DOCSERVER_EMBEDDING_BATCH_SIZE`` env var, if a positive integer.
+        3. :data:`_DEFAULT_EMBEDDING_BATCH_SIZE`.
+
+        Invalid values (non-integer, zero, negative) log a warning and fall
+        back to the default rather than crashing the worker on startup.
+        """
+        if explicit is not None:
+            return max(1, explicit)
+        env_val = os.environ.get("DOCSERVER_EMBEDDING_BATCH_SIZE")
+        if env_val is None or env_val == "":
+            return _DEFAULT_EMBEDDING_BATCH_SIZE
+        try:
+            parsed = int(env_val)
+        except ValueError:
+            logger.warning(
+                "Invalid DOCSERVER_EMBEDDING_BATCH_SIZE=%r; using default %d.",
+                env_val,
+                _DEFAULT_EMBEDDING_BATCH_SIZE,
+                extra={"event": "embedding_batch_size_invalid"},
+            )
+            return _DEFAULT_EMBEDDING_BATCH_SIZE
+        if parsed < 1:
+            logger.warning(
+                "DOCSERVER_EMBEDDING_BATCH_SIZE=%d is < 1; using default %d.",
+                parsed,
+                _DEFAULT_EMBEDDING_BATCH_SIZE,
+                extra={"event": "embedding_batch_size_invalid"},
+            )
+            return _DEFAULT_EMBEDDING_BATCH_SIZE
+        return parsed
 
     def _ensure_model(self) -> None:
         """Download model files if they don't exist locally."""
@@ -181,7 +236,11 @@ class OnnxEmbeddingFunction(EmbeddingFunction[Documents]):
         norm[norm == 0] = 1e-12
         return cast("npt.NDArray[np.float32]", v / norm[:, np.newaxis])
 
-    def _forward(self, documents: list[str], batch_size: int = 32) -> npt.NDArray[np.float32]:
+    def _forward(
+        self, documents: list[str], batch_size: int | None = None
+    ) -> npt.NDArray[np.float32]:
+        if batch_size is None:
+            batch_size = self._batch_size
         all_embeddings = []
         for i in range(0, len(documents), batch_size):
             batch = documents[i : i + batch_size]

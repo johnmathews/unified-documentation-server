@@ -695,6 +695,13 @@ def create_mcp(config: Config) -> FastMCP:
             source_statuses = kb.get_source_statuses()
             poll_interval = config.poll_interval_seconds
 
+            # Live-ping Chroma so we don't keep returning healthy when the
+            # sidecar is unreachable. Run on a worker thread so the event
+            # loop stays free; chromadb's HttpClient has its own httpx-level
+            # timeout so the call returns within seconds even if Chroma is
+            # unresponsive.
+            chroma_ok, chroma_error = await asyncio.to_thread(kb.ping_chroma)
+
             sources_out: list[dict[str, str | int | None]] = []
             per_source_labels: list[str] = []
 
@@ -719,8 +726,11 @@ def create_mcp(config: Config) -> FastMCP:
                 )
 
             # Overall status: error if ALL sources are error/unknown,
-            # degraded if ANY source is warning/error, else healthy.
-            if not per_source_labels:
+            # degraded if ANY source is warning/error or Chroma is down,
+            # else healthy.
+            if not chroma_ok:
+                overall = "degraded"
+            elif not per_source_labels:
                 overall = "healthy"
             elif all(s in ("error", "unknown") for s in per_source_labels):
                 overall = "error"
@@ -736,6 +746,8 @@ def create_mcp(config: Config) -> FastMCP:
                     "total_chunks": sum(s.get("chunk_count", 0) for s in summary),
                     "poll_interval_seconds": poll_interval,
                     "sources": sources_out,
+                    "chroma_alive": chroma_ok,
+                    "chroma_error": chroma_error,
                     "last_ingestion": _get_supervisor().last_ingestion,
                     "last_ingestion_failure": _get_supervisor().last_failure,
                     "chat_model_valid": _chat_model_valid,

@@ -440,6 +440,62 @@ class TestHealthEndpoint:
         assert src["last_error"] is None
         assert src["consecutive_failures"] == 0
 
+    def test_health_includes_chroma_alive_true(self, app) -> None:
+        """/health should ping Chroma on every call and surface the result."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+        response = client.get("/health")
+        body = response.json()
+        # Tests use the in-process PersistentClient fallback whose
+        # heartbeat() works, so chroma_alive should be True.
+        assert body["chroma_alive"] is True
+        assert body["chroma_error"] is None
+
+    def test_health_degrades_when_chroma_down(self, app) -> None:
+        """A failing Chroma heartbeat must downgrade overall status to
+        'degraded' and surface chroma_error."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        kb = server_module._get_kb()
+        with patch.object(
+            kb, "ping_chroma", return_value=(False, "ConnectionError: refused")
+        ):
+            response = client.get("/health")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "degraded"
+        assert body["chroma_alive"] is False
+        assert body["chroma_error"] == "ConnectionError: refused"
+
+    def test_health_chroma_ping_runs_off_event_loop(self, app) -> None:
+        """The chroma heartbeat must be dispatched via asyncio.to_thread so
+        a slow ping doesn't block the request loop. We can't test the
+        wall-clock bound directly under TestClient (its per-request loop
+        waits for the executor to drain on shutdown), so we instead verify
+        the call is dispatched to a worker thread, not the event loop."""
+        import threading
+
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        kb = server_module._get_kb()
+        captured_thread_name: list[str] = []
+
+        def _capture(*_a, **_kw):
+            captured_thread_name.append(threading.current_thread().name)
+            return True, None
+
+        with patch.object(kb, "ping_chroma", side_effect=_capture):
+            response = client.get("/health")
+        assert response.status_code == 200
+        assert captured_thread_name, "ping_chroma was not invoked"
+        # asyncio.to_thread runs in the default ThreadPoolExecutor, whose
+        # threads are named 'asyncio_<n>'. The main / event-loop thread is
+        # not. The exact name varies by Python version, but it must NOT be
+        # the main thread.
+        assert captured_thread_name[0] != "MainThread"
+
 
 class TestRescanEndpoint:
     def test_rescan_starts_background(self, app) -> None:

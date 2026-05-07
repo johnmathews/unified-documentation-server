@@ -180,6 +180,23 @@ class KnowledgeBase:
         """
         return self._embedding_fn.unload()
 
+    def ping_chroma(self) -> tuple[bool, str | None]:
+        """Best-effort liveness check against the Chroma backend.
+
+        Returns ``(True, None)`` on success and ``(False, error_message)``
+        on failure. Wraps ``ClientAPI.heartbeat()`` and converts any
+        exception into a structured result so the caller (typically the
+        ``/health`` handler) can degrade gracefully without try/except
+        plumbing at the call site. Synchronous: callers that need a hard
+        wall-clock bound should run this via ``asyncio.to_thread`` with
+        ``asyncio.wait_for``.
+        """
+        try:
+            _ = self._chroma_client.heartbeat()
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        return True, None
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

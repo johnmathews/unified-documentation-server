@@ -20,7 +20,7 @@
       "mcp__plugin_playwright_playwright__browser_click",
       "mcp__plugin_playwright_playwright__browser_evaluate",
       "mcp__plugin_playwright_playwright__browser_take_screenshot",
-      "Bash(cat /Users/john/projects/home-server/documentation-ui/.github/workflows/*.yml)",
+      "Bash(cat /Users/john/projects/home-server/documentation/documentation-webapp/.github/workflows/*.yml)",
       "Bash(grep -r \"password\\\\|secret\\\\|token\\\\|api_key\\\\|AKIA\\\\|ghp_\\\\|xoxb\\\\|BEGIN.*PRIVATE\" src/ --include=*.ts --include=*.svelte --include=*.js -l)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
@@ -42,8 +42,7 @@
       "Bash(git branch:*)"
     ],
     "additionalDirectories": [
-      "/Users/john/projects/home-server/documentation-ui",
-      "/Users/john/projects/home-server/documentation-webapp"
+      "/Users/john/projects/home-server/documentation/documentation-webapp"
     ]
   }
 }

@@ -150,40 +150,66 @@ class TestListSources:
 
 
 class TestReindex:
+    """The reindex MCP tool dispatches to the ingestion supervisor (which
+    spawns a subprocess in production) and formats its result. We mock the
+    supervisor at the boundary because integration of the worker subprocess
+    against a tmp test config is covered by the supervisor's own tests.
+    """
+
     def test_reindex_empty(self, app):
-        result = _call_tool(app, "reindex")
-        # No sources configured, so empty stats
+        sup = server_module._get_supervisor()
+        with patch.object(sup, "run_subprocess_cycle", return_value={}) as mock_run:
+            result = _call_tool(app, "reindex")
+        mock_run.assert_called_once_with(sources=None)
         parsed = json.loads(result)
-        assert isinstance(parsed, dict)
+        assert parsed == {}
 
     def test_reindex_unknown_source(self, app):
-        result = _call_tool(app, "reindex", source="nonexistent")
+        sup = server_module._get_supervisor()
+        with patch.object(
+            sup, "run_subprocess_cycle", return_value={"docs": {"upserted": 1}}
+        ):
+            result = _call_tool(app, "reindex", source="nonexistent")
         assert "not found" in result.lower()
 
-    def test_reindex_single_source(self, tmp_path: Path) -> None:
-        """reindex(source='x') should only process source 'x'."""
-        source_dir = tmp_path / "repo-x"
-        source_dir.mkdir()
-        (source_dir / "doc.md").write_text("# X Doc\n\nContent for X.")
+    def test_reindex_single_source(self, app):
+        """reindex(source='x') should pass [x] as the sources filter to the
+        supervisor and round-trip the supervisor's per-source stats back to
+        the caller."""
+        sup = server_module._get_supervisor()
+        with patch.object(
+            sup,
+            "run_subprocess_cycle",
+            return_value={"x": {"upserted": 3}},
+        ) as mock_run:
+            result = _call_tool(app, "reindex", source="x")
+        mock_run.assert_called_once_with(sources=["x"])
+        parsed = json.loads(result)
+        assert parsed == {"x": {"upserted": 3}}
 
-        config = Config(
-            sources=[
-                RepoSource(name="x", path=str(source_dir)),
-                RepoSource(name="y", path=str(tmp_path / "repo-y")),
-            ],
-            data_dir=str(tmp_path / "data"),
-        )
-        mcp = server_module.init_app(config)
-        kb = server_module._get_kb()
+    def test_reindex_already_running(self, app):
+        from docserver.ingestion_supervisor import IngestionAlreadyRunning
 
-        try:
-            result = _call_tool(mcp, "reindex", source="x")
-            parsed = json.loads(result)
-            assert "x" in parsed
-            assert "y" not in parsed
-            assert parsed["x"]["upserted"] >= 2  # parent + chunk(s)
-        finally:
-            kb.close()
+        sup = server_module._get_supervisor()
+        with patch.object(
+            sup, "run_subprocess_cycle", side_effect=IngestionAlreadyRunning("busy")
+        ):
+            result = _call_tool(app, "reindex")
+        parsed = json.loads(result)
+        assert parsed == {"status": "already_running"}
+
+    def test_reindex_failed(self, app):
+        sup = server_module._get_supervisor()
+        with patch.object(sup, "run_subprocess_cycle", return_value=None):
+            sup._last_failure = {  # set what the supervisor would have stored
+                "completed_at": "2026-05-07T00:00:00+00:00",
+                "exit_code": "1",
+                "reason": "worker exited non-zero",
+            }
+            result = _call_tool(app, "reindex")
+        parsed = json.loads(result)
+        assert parsed["status"] == "failed"
+        assert parsed["exit_code"] == "1"
 
 
 class TestHealthEndpoint:
@@ -549,6 +575,57 @@ class TestFilesEndpoint:
             assert response.status_code in (400, 404)
         finally:
             kb.close()
+
+
+class TestInventoryCache:
+    """The chat-system-prompt inventory is cached with a short TTL because
+    it reruns a full SQLite tree scan on every chat call. The cache must
+    return on cache hits, refresh on misses, and clear when the supervisor
+    reports a successful ingest cycle.
+    """
+
+    def setup_method(self) -> None:
+        # Each test starts with an empty cache.
+        server_module._invalidate_inventory_cache()
+
+    def test_cache_hits_avoid_kb_calls(self, app) -> None:
+        kb = server_module._get_kb()
+        with patch.object(
+            kb, "get_document_tree", wraps=kb.get_document_tree
+        ) as mock_tree:
+            _ = server_module._get_cached_inventory(kb)
+            _ = server_module._get_cached_inventory(kb)
+            _ = server_module._get_cached_inventory(kb)
+        # First call builds, subsequent calls hit the cache.
+        assert mock_tree.call_count == 1
+
+    def test_invalidation_forces_rebuild(self, app) -> None:
+        kb = server_module._get_kb()
+        with patch.object(
+            kb, "get_document_tree", wraps=kb.get_document_tree
+        ) as mock_tree:
+            _ = server_module._get_cached_inventory(kb)
+            server_module._invalidate_inventory_cache()
+            _ = server_module._get_cached_inventory(kb)
+        assert mock_tree.call_count == 2
+
+    def test_supervisor_invalidates_on_successful_cycle(self, app) -> None:
+        """The supervisor's on_cycle_success callback must clear the cache
+        so the next chat sees a freshly-rendered inventory."""
+        kb = server_module._get_kb()
+        sup = server_module._get_supervisor()
+
+        # Prime the cache.
+        _ = server_module._get_cached_inventory(kb)
+        # Cache is now populated.
+        assert server_module._inventory_cache is not None
+
+        # Trigger the success callback the supervisor would fire after a
+        # worker cycle that returned exit 0 with a parseable payload.
+        assert sup._on_cycle_success is not None
+        sup._on_cycle_success()
+
+        assert server_module._inventory_cache is None
 
 
 class TestInputValidation:

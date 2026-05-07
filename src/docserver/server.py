@@ -400,6 +400,40 @@ _config: Config | None = None
 _conversations: ConversationStore | None = None
 _bookmarks: BookmarkStore | None = None
 
+# Cache for the chat system prompt's inventory context. Each chat request
+# would otherwise scan the documents table and re-render the tree; under
+# bursty chat that re-allocates without changing the result. A short TTL
+# (60s) trades a small staleness window — bounded by the ingestion cadence
+# of ~30 min — for a per-request shortcut.
+_INVENTORY_CACHE_TTL_SECONDS = 60.0
+_inventory_cache_lock = threading.Lock()
+_inventory_cache: tuple[str, float] | None = None  # (rendered_inventory, expires_at_monotonic)
+
+
+def _get_cached_inventory(kb: KnowledgeBase) -> str:
+    """Return the chat-system-prompt inventory string, with a short TTL cache."""
+    global _inventory_cache
+    now = time.monotonic()
+    with _inventory_cache_lock:
+        if _inventory_cache is not None and _inventory_cache[1] > now:
+            return _inventory_cache[0]
+    # Build outside the lock so concurrent chat requests don't serialize
+    # on the table scan; the worst case is a few duplicate builds during
+    # a cache miss, which is harmless.
+    doc_tree = kb.get_document_tree()
+    source_stats = {s["source"]: s for s in kb.get_sources_summary()}
+    inventory = build_inventory_context(doc_tree, source_stats)
+    with _inventory_cache_lock:
+        _inventory_cache = (inventory, time.monotonic() + _INVENTORY_CACHE_TTL_SECONDS)
+    return inventory
+
+
+def _invalidate_inventory_cache() -> None:
+    """Clear the cached inventory string. Called after a successful ingest."""
+    global _inventory_cache
+    with _inventory_cache_lock:
+        _inventory_cache = None
+
 # Single shared Anthropic client. The SDK's underlying httpx client holds a
 # connection pool; creating a new instance per request leaks sockets and
 # grows memory over time. Created lazily on first use inside
@@ -507,9 +541,7 @@ async def _prepare_chat_request(request: Request) -> _ChatRequest | JSONResponse
         },
     ]
 
-    doc_tree = kb.get_document_tree()
-    source_stats = {s["source"]: s for s in kb.get_sources_summary()}
-    inventory = build_inventory_context(doc_tree, source_stats)
+    inventory = _get_cached_inventory(kb)
 
     page_hint = ""
     if current_doc_id:
@@ -736,16 +768,16 @@ def create_mcp(config: Config) -> FastMCP:
             def _run_rescan() -> None:
                 try:
                     t0 = time.monotonic()
-                    metrics = supervisor.run_subprocess_cycle(sources=sources, force=force)
+                    stats = supervisor.run_subprocess_cycle(sources=sources, force=force)
                     duration_ms = int((time.monotonic() - t0) * 1000)
                     logger.info(
-                        "Rescan completed in %dms: metrics=%s",
+                        "Rescan completed in %dms: stats=%s",
                         duration_ms,
-                        metrics,
+                        stats,
                         extra={
                             "event": "rescan",
                             "duration_ms": duration_ms,
-                            "metrics": metrics,
+                            "stats": stats,
                         },
                     )
                 except IngestionAlreadyRunning:
@@ -1504,9 +1536,19 @@ def create_mcp(config: Config) -> FastMCP:
             source: Optional source name to re-index only that source.
                    If empty, re-indexes all sources.
         """
-        ingester = _get_ingester()
+        # Route through the supervisor so the cycle runs in the worker
+        # subprocess. Calling Ingester.run_once() directly here would load
+        # the ONNX embedding model into the server's RSS, defeating the
+        # subprocess-isolation that protects the request loop.
+        supervisor = _get_supervisor()
+        sources = [source] if source else None
         t0 = time.monotonic()
-        stats = ingester.run_once(sources=[source] if source else None)
+        try:
+            stats = supervisor.run_subprocess_cycle(sources=sources)
+        except IngestionAlreadyRunning:
+            return json.dumps({"status": "already_running"}, indent=2)
+        except IngestionTimeout as exc:
+            return json.dumps({"status": "timeout", "error": str(exc)}, indent=2)
         duration_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
             "reindex completed duration_ms=%d stats=%s",
@@ -1515,10 +1557,14 @@ def create_mcp(config: Config) -> FastMCP:
             extra={"event": "reindex", "duration_ms": duration_ms, "stats": stats},
         )
 
+        if stats is None:
+            failure = supervisor.last_failure or {}
+            return json.dumps({"status": "failed", **failure}, indent=2)
+
         if source and source not in stats:
             return f"Source '{source}' not found."
 
-        return json.dumps(stats, indent=2)
+        return json.dumps(stats, indent=2, default=str)
 
     @server.tool()
     def get_bookmarks(user_id: str = "default") -> str:  # pyright: ignore[reportUnusedFunction]
@@ -1567,7 +1613,10 @@ def init_app(config: Config | None = None) -> FastMCP:
         chroma_port=config.chroma_port,
     )
     _ingester = Ingester(config, _kb)
-    _supervisor = IngesterSupervisor(config)
+    _supervisor = IngesterSupervisor(
+        config,
+        on_cycle_success=_invalidate_inventory_cache,
+    )
     _conversations = ConversationStore(config.data_dir)
     _bookmarks = BookmarkStore(config.data_dir)
 

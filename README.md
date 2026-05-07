@@ -244,7 +244,6 @@ data_dir: "/data" # Persistent storage path
 | `DOCSERVER_CHROMA_HOST`           | unset (compose: `chroma`) | Hostname of the Chroma sidecar. **Required in production**; tests fall back to `PersistentClient` when unset. |
 | `DOCSERVER_CHROMA_PORT`           | `8000`                 | Port the Chroma sidecar listens on.                                                                |
 | `DOCSERVER_INGEST_NICE`           | `10` (set by supervisor) | Nice offset applied to each ingestion worker subprocess. Lower priority than the docserver process. |
-| `DOCSERVER_INGEST_MEM_LIMIT_MB`   | unset (compose: `400`) | Soft + hard `RLIMIT_AS` ceiling on the worker, in MiB. Lower than the container `mem_limit` so the worker is killed first under memory pressure. |
 
 See `docs/operations.md` for the full table including all options.
 

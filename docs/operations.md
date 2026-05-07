@@ -300,9 +300,10 @@ Split across the three compose services since WU6:
 
 | Service     | Typical RSS                                   | `mem_limit` | Notes                                                 |
 |-------------|-----------------------------------------------|-------------|-------------------------------------------------------|
-| `docserver` | ~50–80 MB steady state (no embedding model)   | 512 MB      | Spawns the ingestion worker per cycle; itself stays small. |
-| ingestion worker (transient subprocess of docserver) | up to ~350 MB during a cycle, 0 between | inherits the container's 512 MB; capped to 400 MB by `RLIMIT_AS` (`DOCSERVER_INGEST_MEM_LIMIT_MB`) | Loads the ONNX model on every cycle, exits when done — RSS returns to the OS. |
+| `docserver` | ~50–80 MB steady state (no embedding model)   | 768 MB      | Spawns the ingestion worker per cycle; itself stays small. |
+| ingestion worker (transient subprocess of docserver) | typically ~350 MB; can spike past 1 GB on large content cycles, 0 between | shares the docserver container's cgroup | Loads the ONNX model on every cycle, exits when done — RSS returns to the OS. When the cgroup limit fires, Docker's OOM killer picks the worker (highest RSS) cleanly, leaving the server process alive. |
 | `chroma`    | ~50–100 MB depending on index size            | 256 MB      | Stateless above its `/chroma-data` volume.            |
+| `documentation-webapp` | ~50 MB                              | 192 MB      | Stateless SvelteKit proxy; per-request only.          |
 
 Disk: ~100 MB per 10K documents (mostly embeddings in `chroma-data`).
 
@@ -380,7 +381,6 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 | `DOCSERVER_CHROMA_HOST` | `chroma` (in compose) | Hostname of the Chroma sidecar service. When set, the docserver and ingestion worker connect via `chromadb.HttpClient` instead of opening a `PersistentClient` directly. **Required in production** — two `PersistentClient` instances on the same on-disk path corrupt the store in Chroma 1.5.x. Leave unset for tests, which use `PersistentClient` against a tmp dir. |
 | `DOCSERVER_CHROMA_PORT` | `8000` | Port the Chroma sidecar listens on. Matches the `--port` argument to `chroma run`. |
 | `DOCSERVER_INGEST_NICE` | `10` (in supervisor) | Nice offset applied at the start of each ingestion worker subprocess. Lower CPU priority than the docserver process, so the request handlers stay responsive on a contended core. Set to `0` to disable. |
-| `DOCSERVER_INGEST_MEM_LIMIT_MB` | unset (compose: `400`) | Soft + hard ceiling on the worker's address space (`RLIMIT_AS`), in MiB. When set lower than the container's `mem_limit`, the worker is killed first under memory pressure, leaving the docserver process untouched. |
 
 Changes to environment variables require a container restart to take effect.
 

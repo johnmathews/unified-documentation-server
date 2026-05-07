@@ -6,6 +6,15 @@ process is the primary defence against (a) Docker OOM-killing the server
 when ingestion's RSS spikes, and (b) GIL contention pausing the asyncio
 event loop long enough for upstream timeouts.
 
+Memory bound: this process shares the docserver container's cgroup. When
+the container's mem_limit fires, Docker's OOM killer picks the highest-RSS
+process in the cgroup — the worker, since it loads the embedding model and
+holds repo objects. The server parent stays alive. We deliberately do NOT
+set an in-process RLIMIT_AS: ONNX Runtime mmaps model files, which counts
+against virtual address space well before pages are resident, so an rlimit
+small enough to actually bound RSS will fail loads at unpredictable points.
+The cgroup limit is the right boundary.
+
 Usage::
 
     python -m docserver.ingestion_worker [--source NAME ...] [--force]
@@ -78,30 +87,6 @@ def main(argv: list[str] | None = None) -> int:
                 nice_offset,
                 exc,
                 extra={"event": "ingestion_worker_nice_failed"},
-            )
-
-    # Optional memory ceiling. Lower than the container's mem_limit so the
-    # worker is the first to die under pressure, leaving the docserver's
-    # RSS untouched. Set DOCSERVER_INGEST_MEM_LIMIT_MB to e.g. 400 to give
-    # the worker 400 MiB of address space inside a 512 MB container.
-    mem_limit_mb = os.environ.get("DOCSERVER_INGEST_MEM_LIMIT_MB")
-    if mem_limit_mb:
-        try:
-            import resource as _resource
-
-            soft = int(mem_limit_mb) * 1024 * 1024
-            _resource.setrlimit(_resource.RLIMIT_AS, (soft, soft))
-            logger.info(
-                "Ingestion worker memory ceiling set to %s MiB",
-                mem_limit_mb,
-                extra={"event": "ingestion_worker_mem_limit", "limit_mb": int(mem_limit_mb)},
-            )
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                "Could not apply DOCSERVER_INGEST_MEM_LIMIT_MB=%r: %s",
-                mem_limit_mb,
-                exc,
-                extra={"event": "ingestion_worker_mem_limit_failed"},
             )
 
     try:

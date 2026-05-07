@@ -2011,43 +2011,41 @@ class TestMemoryReclaim:
             ingester._run_once_safe()  # must not raise
         mock_reclaim.assert_called_once()
 
-    def test_run_once_safe_unloads_embedding_model(self, tmp_path: Path, kb) -> None:
-        """_run_once_safe must unload the embedding model before reclaiming memory."""
+    def test_run_once_safe_does_not_unload_embedding_model(
+        self, tmp_path: Path, kb
+    ) -> None:
+        """_run_once_safe must NOT unload the embedding model.
+
+        In the production subprocess architecture, the model is loaded
+        inside the worker process which exits and releases all RSS, while
+        the server's KB (used for queries) deliberately keeps the model
+        resident across cycles. Calling unload here would only matter in
+        the obsolete in-process scheduler path; we leave the model alone.
+        """
         config = Config(sources=[], data_dir=str(tmp_path / "data"))
         ingester = Ingester(config, kb)
 
         with patch.object(kb, "unload_embedding_model") as mock_unload:
             ingester._run_once_safe()
-        mock_unload.assert_called_once()
+        mock_unload.assert_not_called()
 
-    def test_run_once_safe_unloads_before_reclaim(self, tmp_path: Path, kb) -> None:
-        """Embedding unload must happen before gc.collect/malloc_trim."""
-        config = Config(sources=[], data_dir=str(tmp_path / "data"))
-        ingester = Ingester(config, kb)
-
-        call_order: list[str] = []
-        with (
-            patch.object(
-                kb,
-                "unload_embedding_model",
-                side_effect=lambda: call_order.append("unload"),
-            ),
-            patch(
-                "docserver.ingestion.reclaim_memory",
-                side_effect=lambda: call_order.append("reclaim") or reclaim_memory(),
-            ),
-        ):
-            ingester._run_once_safe()
-        assert call_order == ["unload", "reclaim"]
-
-    def test_run_once_safe_unloads_on_exception(self, tmp_path: Path, kb) -> None:
-        """Even if run_once raises, the embedding model must still be unloaded."""
+    def test_run_once_safe_still_reclaims_on_exception(
+        self, tmp_path: Path, kb
+    ) -> None:
+        """Even if run_once raises, reclaim_memory must still run."""
         config = Config(sources=[], data_dir=str(tmp_path / "data"))
         ingester = Ingester(config, kb)
 
         with (
             patch.object(ingester, "run_once", side_effect=RuntimeError("boom")),
-            patch.object(kb, "unload_embedding_model") as mock_unload,
+            patch("docserver.ingestion.reclaim_memory") as mock_reclaim,
         ):
+            mock_reclaim.return_value = {
+                "rss_before_mb": 100.0,
+                "rss_after_mb": 80.0,
+                "freed_mb": 20.0,
+                "gc_collected": 0,
+                "malloc_trimmed": True,
+            }
             ingester._run_once_safe()  # must not raise
-        mock_unload.assert_called_once()
+        mock_reclaim.assert_called_once()

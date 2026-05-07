@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING
 from apscheduler.schedulers.background import BackgroundScheduler
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from docserver.config import Config
 
 logger = logging.getLogger(__name__)
@@ -63,15 +65,22 @@ class IngesterSupervisor:
         *,
         worker_module: str = "docserver.ingestion_worker",
         timeout_seconds: float = 600.0,
+        on_cycle_success: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self._worker_module = worker_module
         self._timeout = timeout_seconds
+        self._on_cycle_success = on_cycle_success
         self._scheduler = BackgroundScheduler()
         self._proc_lock = threading.Lock()
         self._current_proc: subprocess.Popen[str] | None = None
         # Most recent successful cycle's metrics, surfaced via /health.
         self._last_ingestion: dict[str, str | int | float] | None = None
+        # Most recent successful cycle's per-source stats (shape matches
+        # Ingester.run_once's return value). Used by manual triggers
+        # (/rescan, reindex MCP tool) that want to report which sources
+        # changed.
+        self._last_stats: dict[str, dict[str, int]] | None = None
         # Most recent failure (timeout, crash, non-zero exit). Cleared on
         # next success. Surfaced via /health for operator visibility.
         self._last_failure: dict[str, str] | None = None
@@ -129,19 +138,37 @@ class IngesterSupervisor:
         sources: list[str] | None = None,
         *,
         force: bool = False,
-    ) -> dict[str, str | int | float] | None:
-        """Run one cycle synchronously. Returns the metrics dict on success.
+    ) -> dict[str, dict[str, int]] | None:
+        """Run one cycle synchronously. Returns the per-source stats on success.
+
+        The returned shape matches ``Ingester.run_once``: a dict keyed by
+        source name with per-source ingestion counters. Cycle-level metrics
+        (duration, RSS, flush counts) are stored separately on
+        ``self._last_ingestion`` for ``/health``.
 
         Raises ``IngestionAlreadyRunning`` if another cycle is in flight,
         and ``IngestionTimeout`` if the worker exceeds the configured
         timeout. Other crashes return ``None`` and set ``_last_failure``.
         """
         argv = list(self._build_worker_argv(sources=sources, force=force))
-        rc, metrics = self._spawn_and_stream(argv, timeout=self._timeout)
-        if rc == 0 and metrics is not None:
-            self._last_ingestion = metrics.get("metrics") or metrics
+        rc, payload = self._spawn_and_stream(argv, timeout=self._timeout)
+        if rc == 0 and payload is not None:
+            cycle_metrics = payload.get("metrics")
+            stats = payload.get("stats")
+            self._last_ingestion = (
+                cycle_metrics if isinstance(cycle_metrics, dict) else None
+            )
+            self._last_stats = stats if isinstance(stats, dict) else None
             self._last_failure = None
-            return self._last_ingestion
+            if self._on_cycle_success is not None:
+                try:
+                    self._on_cycle_success()
+                except Exception:
+                    logger.exception(
+                        "on_cycle_success callback raised; ignoring.",
+                        extra={"event": "supervisor_callback_error"},
+                    )
+            return self._last_stats
         # Non-zero exit or no metrics line — treat as failure but don't raise
         # for the scheduler path. Caller (run_subprocess_cycle's user) decides.
         self._last_failure = {
@@ -158,6 +185,10 @@ class IngesterSupervisor:
     @property
     def last_ingestion(self) -> dict[str, str | int | float] | None:
         return self._last_ingestion
+
+    @property
+    def last_stats(self) -> dict[str, dict[str, int]] | None:
+        return self._last_stats
 
     @property
     def last_failure(self) -> dict[str, str] | None:
@@ -198,8 +229,13 @@ class IngesterSupervisor:
 
     def _spawn_and_stream(
         self, argv: list[str], *, timeout: float
-    ) -> tuple[int, dict[str, str | int | float] | None]:
-        """Spawn the worker, stream its output, return (exit_code, metrics).
+    ) -> tuple[int, dict[str, object] | None]:
+        """Spawn the worker, stream its output, return (exit_code, payload).
+
+        ``payload`` is the parsed final-line JSON from the worker, with the
+        shape ``{"event": "ingestion_cycle_complete", "stats": <per-source>,
+        "metrics": <cycle-level>}``. ``None`` means the worker did not emit
+        a parseable final line (treated as failure by callers).
 
         Enforces the timeout via a watchdog thread that SIGKILLs the worker
         once the deadline passes. The main thread iterates the worker's
@@ -239,7 +275,7 @@ class IngesterSupervisor:
         watchdog = threading.Thread(target=_killer, daemon=True)
         watchdog.start()
 
-        metrics_payload: dict[str, str | int | float] | None = None
+        metrics_payload: dict[str, object] | None = None
         try:
             assert proc.stdout is not None
             for line in proc.stdout:

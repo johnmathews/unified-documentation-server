@@ -76,7 +76,7 @@ def supervisor_factory(monkeypatch, tmp_path, small_config):
 
 def test_run_subprocess_cycle_parses_metrics(supervisor_factory, capsys):
     """A worker that prints the ingestion_cycle_complete sentinel should
-    populate last_ingestion."""
+    populate last_ingestion (cycle-level) and return the per-source stats."""
     body = """
     import json, sys
     print("hello from fake worker", flush=True)
@@ -93,10 +93,13 @@ def test_run_subprocess_cycle_parses_metrics(supervisor_factory, capsys):
     """
     sup = supervisor_factory(body)
     result = sup.run_subprocess_cycle()
-    assert result is not None
-    assert result["duration_s"] == 0.5
-    assert result["rss_at_end_mb"] == 200.0
-    assert sup.last_ingestion == result
+    assert result == {"x": {"upserted": 3}}
+    assert sup.last_stats == result
+    assert sup.last_ingestion == {
+        "duration_s": 0.5,
+        "rss_at_end_mb": 200.0,
+        "flush_count": 2,
+    }
     assert sup.last_failure is None
 
 

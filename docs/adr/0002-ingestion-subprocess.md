@@ -50,11 +50,17 @@ worker runs per supervisor — concurrent calls raise
 The worker reuses `Ingester.run_once` verbatim. The indexing logic
 itself is unchanged.
 
-OS-level guard rails (`DOCSERVER_INGEST_NICE=10` and
-`DOCSERVER_INGEST_MEM_LIMIT_MB=400`) lower the worker's CPU priority
-and clamp its address space below the container's `mem_limit`, so a
-runaway worker is killed by the kernel before Docker has to OOM-kill
-the whole container.
+OS-level guard rail (`DOCSERVER_INGEST_NICE=10`) lowers the worker's
+CPU priority so request handlers stay responsive while embeddings
+are being generated. Memory containment is provided by the
+docserver container's cgroup `mem_limit`, not by an in-process
+`RLIMIT_AS` (an earlier `DOCSERVER_INGEST_MEM_LIMIT_MB` env var
+applied `RLIMIT_AS` on the worker; this was removed because ONNX
+Runtime mmaps its model files, so virtual address space accounting
+diverges sharply from RSS and the rlimit fired at unpredictable
+allocation points). Under cgroup pressure, Docker's OOM killer
+selects the highest-RSS process — the worker — and kills it
+cleanly, leaving the server parent process running.
 
 ## Alternatives considered
 

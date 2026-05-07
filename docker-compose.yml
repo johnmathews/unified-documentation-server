@@ -38,14 +38,20 @@ services:
     depends_on:
       chroma:
         condition: service_healthy
-    # A healthy steady state is ~150 MB (ONNX embedding model ~110 MB +
-    # ChromaDB + SQLite + Python). 512 MB gives ~3x headroom for transient
-    # ingestion spikes. If exceeded, Docker OOM-kills the container cleanly
-    # so it cannot starve other services on the host (it restarts via
-    # unless-stopped). Do NOT raise this without also raising the infra VM
-    # RAM — on a 1.95 GB host, larger limits risk host-wide memory starvation.
-    mem_limit: 1024m
-    mem_reservation: 1024m
+    # Memory budget on a 1.95 GB host (infra VM) sharing RAM with the
+    # observability stack (Loki, Grafana, Alloy, exporters):
+    #   - Server steady state ~250 MB (Python + FastMCP + Anthropic SDK + Chroma HTTP client)
+    #   - Search-time ONNX model load adds ~110 MB
+    #   - Ingestion worker subprocess can spike past 1 GB during embedding
+    # 768 MB caps the container below the VM's available memory so the
+    # cgroup OOM kills the highest-RSS process (the worker subprocess) cleanly,
+    # before the kernel global OOM fires and degrades the whole host.
+    # mem_reservation is the steady-state floor, NOT the peak — keep it low so
+    # Docker's scheduler doesn't pre-commit RAM that's only used during ingest.
+    # Do NOT raise mem_limit above the VM's available RAM, otherwise the
+    # cgroup limit can never trigger and every spike becomes a global OOM.
+    mem_limit: 768m
+    mem_reservation: 256m
     ports:
       - "8085:8080"
     volumes:
@@ -80,10 +86,6 @@ services:
       # in-process PersistentClient).
       - DOCSERVER_CHROMA_HOST=chroma
       - DOCSERVER_CHROMA_PORT=8000
-      # Cap the ingestion worker subprocess at 400 MiB of address space.
-      # The container's mem_limit is 512m above; a worker close to OOM
-      # will be killed before it can take the docserver process down.
-      - DOCSERVER_INGEST_MEM_LIMIT_MB=400
     logging:
       driver: json-file
       options:
@@ -94,6 +96,10 @@ services:
     image: ghcr.io/johnmathews/unified-documentation-webapp:latest
     container_name: documentation-webapp
     restart: unless-stopped
+    # Stateless SvelteKit proxy. Steady state ~50 MB; bounded per-request
+    # buffer of one downloaded file (max 5 MB) for inline rendering.
+    mem_limit: 192m
+    mem_reservation: 64m
     ports:
       - "3002:3000"
     environment:

@@ -194,6 +194,13 @@ class IngesterSupervisor:
     def last_failure(self) -> dict[str, str] | None:
         return self._last_failure
 
+    @property
+    def ingestion_running(self) -> bool:
+        """True if a worker subprocess is currently executing a cycle."""
+        with self._proc_lock:
+            proc = self._current_proc
+            return proc is not None and proc.poll() is None
+
     # ------------------------------------------------------------------
     # Internal: subprocess plumbing
     # ------------------------------------------------------------------

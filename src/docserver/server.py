@@ -750,6 +750,8 @@ def create_mcp(config: Config) -> FastMCP:
                     "chroma_error": chroma_error,
                     "last_ingestion": _get_supervisor().last_ingestion,
                     "last_ingestion_failure": _get_supervisor().last_failure,
+                    "last_stats": _get_supervisor().last_stats,
+                    "ingestion_running": _get_supervisor().ingestion_running,
                     "chat_model_valid": _chat_model_valid,
                     "chat_model_error": _chat_model_error,
                 }
@@ -812,10 +814,15 @@ def create_mcp(config: Config) -> FastMCP:
             # Cheap pre-check so we can return 409 synchronously when a cycle
             # is obviously already running. The supervisor enforces the
             # invariant authoritatively inside _spawn_and_stream.
-            if (
-                supervisor._current_proc is not None
-                and supervisor._current_proc.poll() is None
-            ):
+            if supervisor.ingestion_running:
+                logger.info(
+                    "Rescan trigger ignored: ingestion already running.",
+                    extra={
+                        "event": "rescan_noop_already_running",
+                        "force": force,
+                        "sources": sources or "all",
+                    },
+                )
                 return JSONResponse({"status": "already_running"}, status_code=409)
 
             thread = threading.Thread(target=_run_rescan, daemon=True)

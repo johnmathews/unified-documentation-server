@@ -289,6 +289,56 @@ class TestHealthEndpoint:
         body = response.json()
         assert body["last_ingestion_failure"]["exit_code"] == "1"
 
+    def test_health_exposes_last_stats(self, app) -> None:
+        """/health surfaces per-source last_stats so the UI can render a scan summary."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        supervisor = server_module._get_supervisor()
+        original = supervisor._last_stats
+        supervisor._last_stats = {
+            "tech-blog": {
+                "upserted": 4,
+                "deleted": 1,
+                "skipped": 12,
+                "new": 3,
+                "modified": 1,
+                "files": 16,
+                "errors": 0,
+            }
+        }
+        try:
+            response = client.get("/health")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["last_stats"] is not None
+            assert body["last_stats"]["tech-blog"]["new"] == 3
+            assert body["last_stats"]["tech-blog"]["modified"] == 1
+            assert body["last_stats"]["tech-blog"]["deleted"] == 1
+        finally:
+            supervisor._last_stats = original
+
+    def test_health_exposes_ingestion_running(self, app) -> None:
+        """/health surfaces ingestion_running so the UI can poll for completion."""
+        from unittest.mock import MagicMock
+
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        supervisor = server_module._get_supervisor()
+        original = supervisor._current_proc
+        try:
+            response = client.get("/health")
+            assert response.json()["ingestion_running"] is False
+
+            fake_proc = MagicMock()
+            fake_proc.poll.return_value = None
+            supervisor._current_proc = fake_proc
+            response = client.get("/health")
+            assert response.json()["ingestion_running"] is True
+        finally:
+            supervisor._current_proc = original
+
     def test_health_reflects_chat_model_invalid(self, app) -> None:
         """/health should expose chat_model_valid=False when probe failed."""
         starlette_app = app.streamable_http_app()
@@ -518,8 +568,9 @@ class TestRescanEndpoint:
             body = response.json()
             assert body["status"] == "started"
 
-    def test_rescan_rejects_concurrent(self, app) -> None:
-        """POST /rescan should return 409 if the supervisor reports a cycle in flight."""
+    def test_rescan_rejects_concurrent(self, app, caplog) -> None:
+        """POST /rescan should return 409 (and log the no-op) when a cycle is in flight."""
+        import logging
         from unittest.mock import MagicMock
 
         starlette_app = app.streamable_http_app()
@@ -533,9 +584,14 @@ class TestRescanEndpoint:
         original = supervisor._current_proc
         supervisor._current_proc = fake_proc
         try:
-            response = client.post("/rescan")
+            with caplog.at_level(logging.INFO, logger="docserver.server"):
+                response = client.post("/rescan")
             assert response.status_code == 409
             assert response.json()["status"] == "already_running"
+            assert any(
+                "ignored" in r.getMessage() and "already running" in r.getMessage()
+                for r in caplog.records
+            ), "expected an INFO log explaining the no-op"
         finally:
             supervisor._current_proc = original
 

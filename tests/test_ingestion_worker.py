@@ -97,7 +97,11 @@ def test_main_passes_source_and_force_flags(small_config):
         rc = worker_module.main(argv=["--source", "x", "--force"])
 
     assert rc == 0
-    fake_ingester.run_once.assert_called_once_with(sources=["x"], force=True)
+    fake_ingester.run_once.assert_called_once()
+    call_kwargs = fake_ingester.run_once.call_args.kwargs
+    assert call_kwargs["sources"] == ["x"]
+    assert call_kwargs["force"] is True
+    assert callable(call_kwargs["progress_callback"])
 
 
 def test_nice_env_var_applied(small_config, monkeypatch):

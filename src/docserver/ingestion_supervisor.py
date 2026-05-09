@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 # Sentinel used to spot the worker's final metrics line in stdout.
 _WORKER_FINAL_EVENT = '"ingestion_cycle_complete"'
+# Sentinel used to spot per-cycle progress events emitted by the worker.
+_WORKER_PROGRESS_EVENT = '"scan_progress"'
 
 
 class IngestionAlreadyRunning(RuntimeError):
@@ -84,6 +86,12 @@ class IngesterSupervisor:
         # Most recent failure (timeout, crash, non-zero exit). Cleared on
         # next success. Surfaced via /health for operator visibility.
         self._last_failure: dict[str, str] | None = None
+        # Live progress for the in-flight cycle. Updated as the worker
+        # emits "scan_progress" events on stdout, and cleared back to None
+        # once the worker exits. Surfaced via /health so the webapp banner
+        # can show "Processing X/N: …" instead of just "Scanning…".
+        self._progress_lock = threading.Lock()
+        self._current_progress: dict[str, str | int] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -151,7 +159,13 @@ class IngesterSupervisor:
         timeout. Other crashes return ``None`` and set ``_last_failure``.
         """
         argv = list(self._build_worker_argv(sources=sources, force=force))
-        rc, payload = self._spawn_and_stream(argv, timeout=self._timeout)
+        with self._progress_lock:
+            self._current_progress = {"phase": "starting"}
+        try:
+            rc, payload = self._spawn_and_stream(argv, timeout=self._timeout)
+        finally:
+            with self._progress_lock:
+                self._current_progress = None
         if rc == 0 and payload is not None:
             cycle_metrics = payload.get("metrics")
             stats = payload.get("stats")
@@ -193,6 +207,19 @@ class IngesterSupervisor:
     @property
     def last_failure(self) -> dict[str, str] | None:
         return self._last_failure
+
+    @property
+    def current_progress(self) -> dict[str, str | int] | None:
+        """Latest scan_progress event from the in-flight worker, or None.
+
+        Returns None when no cycle is running. While a cycle is in flight,
+        returns the most recent payload — e.g.
+        ``{"phase": "processing", "current": 7, "total": 42, ...}``.
+        """
+        with self._progress_lock:
+            if self._current_progress is None:
+                return None
+            return dict(self._current_progress)
 
     @property
     def ingestion_running(self) -> bool:
@@ -295,6 +322,19 @@ class IngesterSupervisor:
                     # just keep going — bad parse is not fatal.
                     with contextlib.suppress(json.JSONDecodeError):
                         metrics_payload = json.loads(line)
+                elif _WORKER_PROGRESS_EVENT in line:
+                    # Live progress event — surface latest to /health.
+                    with contextlib.suppress(json.JSONDecodeError):
+                        parsed = json.loads(line)
+                        if (
+                            isinstance(parsed, dict)
+                            and parsed.get("event") == "scan_progress"
+                        ):
+                            payload_dict = {
+                                k: v for k, v in parsed.items() if k != "event"
+                            }
+                            with self._progress_lock:
+                                self._current_progress = payload_dict
             rc = proc.wait()
         finally:
             stop_event.set()

@@ -105,10 +105,25 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("Failed to open KnowledgeBase in ingestion worker.")
         return 1
 
+    def _emit_progress(payload: dict[str, str | int]) -> None:
+        # Dedicated IPC channel to the supervisor: a single-line JSON event
+        # with "event": "scan_progress". The supervisor parses these out of
+        # the worker's stdout to populate /health's current_progress field.
+        # Kept separate from the structured logger so it survives even if
+        # the operator changes the log format.
+        print(
+            json.dumps({"event": "scan_progress", **payload}),
+            flush=True,
+        )
+
     try:
         ingester = Ingester(config, kb)
         try:
-            stats = ingester.run_once(sources=args.source, force=args.force)
+            stats = ingester.run_once(
+                sources=args.source,
+                force=args.force,
+                progress_callback=_emit_progress,
+            )
         except Exception:
             logger.exception("Unhandled exception during ingestion cycle.")
             return 1

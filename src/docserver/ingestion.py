@@ -30,8 +30,15 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from git import InvalidGitRepositoryError, Repo
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from docserver.config import Config, RepoSource
     from docserver.knowledge_base import KnowledgeBase
+
+    # Each call carries a dict describing the current scan phase. The default
+    # callback in ingestion_worker prints these as "scan_progress" JSON lines
+    # on stdout for the supervisor to parse and surface via /health.
+    ProgressCallback = Callable[[dict[str, str | int]], None]
 
 logger = logging.getLogger(__name__)
 
@@ -1169,8 +1176,82 @@ class Ingester:
 
         return count
 
+    def _count_pending_files(
+        self,
+        targets: list[RepoSource],
+        sync_results: dict[str, bool | None],
+        *,
+        force: bool,
+    ) -> tuple[int, int]:
+        """Discovery pass — return ``(total_pending, sources_with_changes)``.
+
+        Walks every target's files, parses each, and compares its content
+        hash against the previously-indexed value. Mirrors the same skip
+        logic as the main processing loop so the count matches what the
+        loop will actually do. Failures (parse errors, unreadable files)
+        are silently absorbed: the main loop will surface them as proper
+        errors. Discovery is best-effort; if it under- or over-counts, the
+        worst case is a slightly off "Found N documents…" banner.
+        """
+        total_pending = 0
+        sources_with_changes = 0
+
+        for source in targets:
+            sync_result = sync_results.get(source.name)
+            if sync_result is None:
+                continue
+            if not force and source.is_remote and sync_result is False:
+                # HEAD unchanged — main loop short-circuits the same way.
+                continue
+            manager = self._managers.get(source.name)
+            if manager is None:
+                continue
+
+            repo_root = manager.get_repo_path()
+            try:
+                files = manager.get_files()
+            except Exception:
+                continue
+            if not files:
+                continue
+
+            indexed_hashes = self.kb.get_indexed_content_hashes(source.name)
+            source_pending = 0
+
+            for file_path in files:
+                is_binary = file_path.suffix.lower() in DocumentParser.BINARY_EXTENSIONS
+                base_doc_id = (
+                    f"{source.name}:{file_path.relative_to(repo_root).as_posix()}"
+                )
+                try:
+                    if is_binary:
+                        content_hash = hashlib.sha256(
+                            file_path.read_bytes()
+                        ).hexdigest()
+                    else:
+                        text = file_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                        content_hash = hashlib.sha256(text.encode()).hexdigest()
+                except Exception:
+                    continue
+
+                prev_hash = indexed_hashes.get(base_doc_id)
+                if force or not prev_hash or prev_hash != content_hash:
+                    source_pending += 1
+
+            if source_pending:
+                sources_with_changes += 1
+            total_pending += source_pending
+
+        return total_pending, sources_with_changes
+
     def run_once(
-        self, sources: list[str] | None = None, *, force: bool = False
+        self,
+        sources: list[str] | None = None,
+        *,
+        force: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, dict[str, int]]:
         """Run a full ingestion cycle across configured sources.
 
@@ -1178,6 +1259,12 @@ class Ingester:
             sources: Optional list of source names to restrict ingestion to.
                      If None or empty, all configured sources are ingested.
             force: If True, re-index all files regardless of content hash.
+            progress_callback: Optional fn invoked with a dict describing the
+                     current scan phase. Called with ``{"phase": "syncing"}``
+                     before sync, ``{"phase": "discovery_done", ...}`` after
+                     enumerating which files need work, and
+                     ``{"phase": "processing", "current": X, "total": N, ...}``
+                     before each file is parsed and upserted.
 
         For each source:
           1. Sync the repo (clone/pull).
@@ -1189,9 +1276,15 @@ class Ingester:
         Returns a dict keyed by source name with ``{upserted, deleted}``
         counts.
         """
+        # Use a no-op default so the body can call it unconditionally.
+        if progress_callback is None:
+            progress_callback = lambda _payload: None  # noqa: E731
+
         cycle_start_t = time.perf_counter()
         rss_at_start_mb = _rss_mb()
         flush_durations: list[float] = []
+
+        progress_callback({"phase": "syncing"})
 
         # Clean up sources that were removed or renamed in config.
         if not sources:
@@ -1275,6 +1368,25 @@ class Ingester:
             for s in targets:
                 name, changed = _sync_source(s)
                 sync_results[name] = changed
+
+        # Discovery pass: walk every source's files, parse + hash, count files
+        # that will need processing. Lets us announce an accurate total before
+        # heavy embedding/upsert work starts. Each file is parsed twice (once
+        # here, once in the processing loop below); markdown parsing is just
+        # a file read + regex, so the cost is dwarfed by chunking and embedding.
+        pending_total, sources_with_changes = self._count_pending_files(
+            targets, sync_results, force=force
+        )
+        progress_callback(
+            {
+                "phase": "discovery_done",
+                "total_docs": pending_total,
+                "sources_changed": sources_with_changes,
+                "sources_total": len(targets),
+            }
+        )
+        # Global counter across all sources for the "processing X/N" banner.
+        processed_progress = 0
 
         for source in targets:
             source_stats = {
@@ -1492,6 +1604,19 @@ class Ingester:
                 # Determine if this is a new or modified file.
                 is_new = base_doc_id not in indexed_hashes
                 change_type = "new" if is_new else "modified"
+
+                # Announce this file before the work happens — webapp banner
+                # reads this off /health to show "Processing X/N: <doc>".
+                processed_progress += 1
+                progress_callback(
+                    {
+                        "phase": "processing",
+                        "current": processed_progress,
+                        "total": pending_total,
+                        "source": source.name,
+                        "doc": base_metadata.get("file_path", base_doc_id),
+                    }
+                )
 
                 # Binary files are stored as metadata only — no chunking.
                 if is_binary:

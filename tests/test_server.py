@@ -339,6 +339,42 @@ class TestHealthEndpoint:
         finally:
             supervisor._current_proc = original
 
+    def test_health_exposes_current_progress(self, app) -> None:
+        """/health surfaces the supervisor's current_progress so the webapp
+        can render live scan progress."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+
+        supervisor = server_module._get_supervisor()
+        original = supervisor._current_progress
+        try:
+            # When idle, current_progress is null.
+            response = client.get("/health")
+            assert response.json()["current_progress"] is None
+
+            # When a scan is in flight, current_progress mirrors the latest
+            # scan_progress event from the worker.
+            with supervisor._progress_lock:
+                supervisor._current_progress = {
+                    "phase": "processing",
+                    "current": 7,
+                    "total": 42,
+                    "source": "demo",
+                    "doc": "guide.md",
+                }
+            response = client.get("/health")
+            body = response.json()
+            assert body["current_progress"] == {
+                "phase": "processing",
+                "current": 7,
+                "total": 42,
+                "source": "demo",
+                "doc": "guide.md",
+            }
+        finally:
+            with supervisor._progress_lock:
+                supervisor._current_progress = original
+
     def test_health_reflects_chat_model_invalid(self, app) -> None:
         """/health should expose chat_model_valid=False when probe failed."""
         starlette_app = app.streamable_http_app()

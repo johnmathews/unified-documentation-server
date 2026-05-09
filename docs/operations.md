@@ -42,6 +42,11 @@ Each source entry includes:
 The top-level response also includes:
 
 - `last_ingestion` -- diagnostic metrics from the most recent ingestion cycle, populated only after the first cycle completes. Fields: `completed_at` (ISO timestamp), `duration_s` (total cycle wall time), `rss_at_start_mb` / `rss_at_end_mb` (process peak RSS observed at cycle boundaries; monotonically non-decreasing because `ru_maxrss` is a lifetime peak), `rss_growth_mb` (delta), `flush_count`, `flush_total_s`, `flush_max_s` (per-batch upsert+embed timing).
+- `current_progress` -- live progress for the in-flight ingestion cycle, or `null` when no cycle is running. The webapp polls this to render the "Scan Now" banner. Possible shapes:
+  - `{"phase": "starting"}` -- worker subprocess is spawning.
+  - `{"phase": "syncing"}` -- syncing all sources (git fetch/pull).
+  - `{"phase": "discovery_done", "total_docs": N, "sources_changed": M, "sources_total": K}` -- the discovery pass has finished walking files and computing hashes; `N` is the number of documents that need re-embedding.
+  - `{"phase": "processing", "current": X, "total": N, "source": "...", "doc": "..."}` -- emitted before each individual file is parsed, chunked, and upserted. `current` advances 1..N across all sources.
 - `chat_model_valid` -- `false` if the configured `DOCSERVER_CHAT_MODEL` was rejected by the Anthropic API at startup (e.g. invalid alias). When `false`, both `/api/chat` and `/api/chat/stream` short-circuit with HTTP 503 and the webapp can disable its chat UI proactively. The probe is skipped if `ANTHROPIC_API_KEY` is unset, leaving this field `true` (validity is assumed).
 - `chat_model_error` -- the Anthropic error message that caused the probe to fail, or `null`.
 

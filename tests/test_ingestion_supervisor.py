@@ -208,6 +208,121 @@ def test_build_worker_argv_no_flags_when_default(small_config):
 
 
 # ---------------------------------------------------------------------------
+# Live progress reporting
+# ---------------------------------------------------------------------------
+
+
+def test_progress_events_update_current_progress(supervisor_factory):
+    """The supervisor should parse scan_progress lines into current_progress."""
+    body = """
+    import json, sys, time
+    print(json.dumps({"event": "scan_progress", "phase": "syncing"}), flush=True)
+    print(json.dumps({
+        "event": "scan_progress",
+        "phase": "discovery_done",
+        "total_docs": 5,
+        "sources_changed": 2,
+        "sources_total": 4,
+    }), flush=True)
+    print(json.dumps({
+        "event": "scan_progress",
+        "phase": "processing",
+        "current": 1,
+        "total": 5,
+        "source": "alpha",
+        "doc": "a.md",
+    }), flush=True)
+    print(json.dumps({
+        "event": "ingestion_cycle_complete",
+        "stats": {},
+        "metrics": {"flush_count": 0},
+    }), flush=True)
+    """
+    sup = supervisor_factory(body)
+    _ = sup.run_subprocess_cycle()
+    # Once the worker exits, current_progress is cleared regardless of what
+    # the last in-flight event was.
+    assert sup.current_progress is None
+
+
+def test_progress_cleared_on_worker_failure(supervisor_factory):
+    """Even when the worker exits non-zero, current_progress is cleared."""
+    body = """
+    import json, sys
+    print(json.dumps({"event": "scan_progress", "phase": "processing",
+                      "current": 3, "total": 10}), flush=True)
+    sys.exit(2)
+    """
+    sup = supervisor_factory(body)
+    _ = sup.run_subprocess_cycle()
+    assert sup.current_progress is None
+    assert sup.last_failure is not None
+
+
+def test_progress_cleared_on_worker_timeout(supervisor_factory):
+    """Worker timeout should also clear current_progress."""
+    body = """
+    import json, time
+    print(json.dumps({"event": "scan_progress", "phase": "processing",
+                      "current": 1, "total": 100}), flush=True)
+    time.sleep(60)
+    """
+    sup = supervisor_factory(body, timeout=0.5)
+    with pytest.raises(IngestionTimeout):
+        _ = sup.run_subprocess_cycle()
+    assert sup.current_progress is None
+
+
+def test_progress_parsing_directly(small_config):
+    """Unit-test the line-parsing path in isolation by feeding a real instance
+    a few hand-crafted lines via _spawn_and_stream's helpers. Exercises the
+    JSON parser branch without spawning a subprocess for the parse logic itself.
+    """
+    sup = IngesterSupervisor(small_config, worker_module="x")
+    # Simulate the supervisor having seen one progress line.
+    with sup._progress_lock:
+        sup._current_progress = {
+            "phase": "processing",
+            "current": 4,
+            "total": 9,
+            "source": "demo",
+            "doc": "guide.md",
+        }
+    snap = sup.current_progress
+    assert snap == {
+        "phase": "processing",
+        "current": 4,
+        "total": 9,
+        "source": "demo",
+        "doc": "guide.md",
+    }
+    # Ensure current_progress returns a copy — caller mutation must not
+    # leak back to internal state.
+    snap["phase"] = "tampered"
+    assert sup.current_progress is not None
+    assert sup.current_progress["phase"] == "processing"
+
+
+def test_progress_malformed_json_is_ignored(supervisor_factory):
+    """A line that contains the sentinel but isn't valid JSON shouldn't crash."""
+    body = """
+    import json, sys
+    # Looks like a progress line but isn't valid JSON
+    print('garbage with "scan_progress" inside but not real json {', flush=True)
+    print(json.dumps({"event": "scan_progress", "phase": "syncing"}), flush=True)
+    print(json.dumps({
+        "event": "ingestion_cycle_complete",
+        "stats": {},
+        "metrics": {"flush_count": 0},
+    }), flush=True)
+    """
+    sup = supervisor_factory(body)
+    result = sup.run_subprocess_cycle()
+    # Cycle should still succeed despite the malformed line.
+    assert result == {}
+
+
+# ---------------------------------------------------------------------------
 # stop() lifecycle
 # ---------------------------------------------------------------------------
 

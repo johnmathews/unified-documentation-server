@@ -1007,6 +1007,88 @@ class TestIngester:
         assert stats["new-src"]["modified"] == 0
         assert stats["new-src"]["skipped"] == 0
 
+    def test_run_once_emits_progress_events(self, tmp_path: Path, kb) -> None:
+        """run_once should call progress_callback through the full sequence:
+        syncing -> discovery_done -> processing(1..N) for a fresh ingest."""
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "progress-src",
+            {
+                "a.md": "# A\n\nAlpha.",
+                "b.md": "# B\n\nBeta.",
+                "c.md": "# C\n\nGamma.",
+            },
+        )
+        config = Config(
+            sources=[RepoSource(name="progress-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        events: list[dict] = []
+
+        ingester = Ingester(config, kb)
+        ingester.run_once(progress_callback=events.append)
+
+        phases = [e["phase"] for e in events]
+        assert phases[0] == "syncing"
+        assert "discovery_done" in phases
+        # Exactly one discovery_done event with the right counts.
+        discovery = next(e for e in events if e["phase"] == "discovery_done")
+        assert discovery["total_docs"] == 3
+        assert discovery["sources_changed"] == 1
+        assert discovery["sources_total"] == 1
+        # Exactly N processing events with monotonically increasing current.
+        processing = [e for e in events if e["phase"] == "processing"]
+        assert len(processing) == 3
+        assert [e["current"] for e in processing] == [1, 2, 3]
+        assert all(e["total"] == 3 for e in processing)
+        assert all(e["source"] == "progress-src" for e in processing)
+        # Each event names the doc being processed.
+        assert {e["doc"] for e in processing} == {"a.md", "b.md", "c.md"}
+
+    def test_run_once_progress_unchanged_files_not_in_processing(
+        self, tmp_path: Path, kb
+    ) -> None:
+        """Files that are unchanged on a re-run shouldn't fire processing events.
+        discovery_done should report total_docs=0 and sources_changed=0."""
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "stable-src",
+            {"a.md": "# A\n\nContent."},
+        )
+        config = Config(
+            sources=[RepoSource(name="stable-src", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        # First run — primes the indexed_hashes table.
+        ingester.run_once()
+
+        # Second run — nothing changed.
+        events: list[dict] = []
+        ingester.run_once(progress_callback=events.append)
+
+        discovery = next(e for e in events if e["phase"] == "discovery_done")
+        assert discovery["total_docs"] == 0
+        assert discovery["sources_changed"] == 0
+        processing = [e for e in events if e["phase"] == "processing"]
+        assert processing == []
+
+    def test_run_once_progress_no_callback_is_noop(self, tmp_path: Path, kb) -> None:
+        """Omitting progress_callback shouldn't change behaviour at all."""
+        source_dir = self._make_source_dir(
+            tmp_path,
+            "no-cb",
+            {"a.md": "# A\n\nContent."},
+        )
+        config = Config(
+            sources=[RepoSource(name="no-cb", path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+        )
+        ingester = Ingester(config, kb)
+        # No exception, normal stats returned.
+        stats = ingester.run_once()
+        assert stats["no-cb"]["new"] == 1
+
     def test_run_once_modified_file_counted_as_modified(self, tmp_path: Path, kb) -> None:
         """A changed file on the second run should be counted as 'modified', not 'new'."""
         import time

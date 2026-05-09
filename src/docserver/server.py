@@ -752,6 +752,7 @@ def create_mcp(config: Config) -> FastMCP:
                     "last_ingestion_failure": _get_supervisor().last_failure,
                     "last_stats": _get_supervisor().last_stats,
                     "ingestion_running": _get_supervisor().ingestion_running,
+                    "current_progress": _get_supervisor().current_progress,
                     "chat_model_valid": _chat_model_valid,
                     "chat_model_error": _chat_model_error,
                 }

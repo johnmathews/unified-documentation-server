@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, ClassVar, TypedDict, cast
 import chromadb
 
 from docserver.embedding import OnnxEmbeddingFunction
+from docserver.reranker import rerank as _rerank
 
 if TYPE_CHECKING:
     from chromadb.api.types import Metadata, Where
@@ -653,12 +654,12 @@ class KnowledgeBase:
         n_results: int = 10,
         source_filter: str | None = None,
     ) -> list[SearchResult]:
-        """Hybrid chunk-level search: BM25 + dense, fused with RRF.
+        """Hybrid chunk-level search: BM25 + dense, fused with RRF, then L2 rerank.
 
         Used by the chat agent's ``search_docs`` tool. Returns chunk-level
-        results ordered by RRF score descending. The score field holds the
-        RRF score (higher = better) — the inverse of the legacy ChromaDB
-        distance scale.
+        results ordered by cross-encoder logit descending. The score field
+        holds the rerank logit (higher = better). If the reranker is
+        unavailable the L1-fused order is returned with RRF scores.
         """
         dense = self._dense_search(
             query, n_results=_RRF_CANDIDATE_K, source_filter=source_filter,
@@ -675,12 +676,12 @@ class KnowledgeBase:
         by_id.update({r["doc_id"]: r for r in dense})
 
         fused = self._rrf_fuse([dense, bm25])
-        output: list[SearchResult] = []
-        for doc_id, rrf_score in fused[:n_results]:
+        l1_top: list[SearchResult] = []
+        for doc_id, rrf_score in fused[:_L1_OUTPUT_SIZE]:
             base = by_id.get(doc_id)
             if base is None:
                 continue
-            output.append(
+            l1_top.append(
                 SearchResult(
                     doc_id=base["doc_id"],
                     content=base["content"],
@@ -688,7 +689,8 @@ class KnowledgeBase:
                     score=rrf_score,
                 )
             )
-        return output
+
+        return _rerank(query, l1_top, top_k=n_results)
 
     def query_documents(
         self,
@@ -982,19 +984,30 @@ class KnowledgeBase:
         by_id.update({r["doc_id"]: r for r in dense})
 
         fused = self._rrf_fuse([dense, bm25])
-        l1_top: list[tuple[str, float, SearchResult]] = []
+        l1_top: list[SearchResult] = []
         for doc_id, rrf_score in fused[:_L1_OUTPUT_SIZE]:
             base = by_id.get(doc_id)
             if base is None:
                 continue
-            l1_top.append((doc_id, rrf_score, base))
+            l1_top.append(
+                SearchResult(
+                    doc_id=base["doc_id"],
+                    content=base["content"],
+                    metadata=base["metadata"],
+                    score=rrf_score,
+                )
+            )
 
-        # L2 rerank goes here once docserver.reranker lands. For now, the
-        # post-fusion chunk order is used directly.
+        # L2 rerank reorders all L1 candidates; dedup-to-parent then takes
+        # the highest-scoring chunk per parent. Reranking before dedup means
+        # the cross-encoder sees full chunk content, not just the first
+        # chunk per parent.
+        reranked = _rerank(query, l1_top, top_k=len(l1_top))
 
         seen_parents: set[str] = set()
         parent_docs: list[dict[str, _Scalar]] = []
-        for doc_id, score, chunk in l1_top:
+        for chunk in reranked:
+            doc_id = chunk["doc_id"]
             parent_id = doc_id.split("#chunk")[0] if "#chunk" in doc_id else doc_id
             if parent_id in seen_parents:
                 continue
@@ -1011,7 +1024,7 @@ class KnowledgeBase:
                     "title": doc["title"],
                     "created_at": doc["created_at"],
                     "modified_at": doc["modified_at"],
-                    "score": score,
+                    "score": chunk["score"],
                     "snippet": str(chunk["content"])[:200],
                 }
             )

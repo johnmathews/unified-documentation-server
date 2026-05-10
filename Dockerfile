@@ -15,6 +15,12 @@ ENV DOCSERVER_MODEL_DIR=/app/models-cache
 RUN .venv/bin/python -c "from docserver.embedding import OnnxEmbeddingFunction; ef = OnnxEmbeddingFunction(); ef._ensure_model()"
 ENV DOCSERVER_MODEL_DIR=
 
+# Pre-download the cross-encoder reranker (~23 MB int8). Same seed-from-image
+# logic at runtime as the embedding model.
+ENV DOCSERVER_RERANKER_MODEL_DIR=/app/reranker-cache
+RUN .venv/bin/python -c "from docserver.reranker import get_reranker; get_reranker()._ensure_model()"
+ENV DOCSERVER_RERANKER_MODEL_DIR=
+
 # Remove sympy (~30MB) - onnxruntime lists it as a dep but only uses it for
 # symbolic graph optimization, not inference. Safe to strip.
 RUN rm -rf .venv/lib/python*/site-packages/sympy \

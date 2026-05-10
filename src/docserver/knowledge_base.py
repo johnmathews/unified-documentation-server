@@ -1,10 +1,23 @@
-"""Knowledge base layer combining SQLite (structured metadata) and ChromaDB (vector search)."""
+"""Knowledge base layer combining SQLite (structured + BM25) and ChromaDB (dense vectors).
+
+Search is a two-stage hybrid pipeline:
+
+* **L1**: SQLite FTS5 BM25 over chunk content/title and ChromaDB cosine over chunk
+  embeddings, fused with Reciprocal Rank Fusion (k=60). Top ``_L1_OUTPUT_SIZE``
+  chunks pass to L2.
+* **L2**: cross-encoder rerank (see :mod:`docserver.reranker`). Wired in by
+  ``search`` and ``search_documents`` once the reranker module ships.
+
+The legacy ``_keyword_search_title_path`` synthetic-score fallback was deleted —
+FTS5 with a title-weighted BM25 query subsumes it without the score-scale hack.
+"""
 
 from __future__ import annotations
 
 import contextlib
 import logging
 import os
+import re
 import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, TypedDict, cast
@@ -73,6 +86,19 @@ CREATE TABLE IF NOT EXISTS source_status (
     last_error_at        TEXT,
     consecutive_failures INTEGER DEFAULT 0
 );
+
+-- Full-text BM25 index over chunk content. ``title`` is included so that
+-- title-only matches still surface (BM25 weights it 2x via bm25(title,content)).
+-- Tokenizer choice: ``unicode61`` (case + accent insensitive, no stemming) so
+-- proper-noun queries like "strava" match the surface form rather than a
+-- stemmed root.
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    title,
+    content,
+    doc_id UNINDEXED,
+    source UNINDEXED,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
 """
 
 _MIGRATIONS = [
@@ -80,6 +106,36 @@ _MIGRATIONS = [
 ]
 
 _CHROMA_COLLECTION = "documents"
+
+# Hybrid search tuning. _RRF_CANDIDATE_K = top-K from each L1 leg before fusion.
+# _L1_OUTPUT_SIZE = candidates handed to L2 rerank. _RRF_K = standard RRF
+# damping (Cormack et al. 2009). _BM25_TITLE_WEIGHT > _BM25_CONTENT_WEIGHT lets
+# title-only matches outrank weak content matches without crowding out strong
+# content matches.
+_RRF_CANDIDATE_K = 100
+_L1_OUTPUT_SIZE = 50
+_RRF_K = 60
+_BM25_TITLE_WEIGHT = 2.0
+_BM25_CONTENT_WEIGHT = 1.0
+
+# Characters that are FTS5 query operators. Stripped from raw user queries so
+# typing a literal `"foo*bar"` does not raise a syntax error.
+_FTS5_OPERATOR_RE = re.compile(r'[\"\'\*\(\)\-:^]')
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Convert a free-text query to an FTS5-safe MATCH expression.
+
+    Strips FTS5 operators, splits on whitespace, and rejoins as space-separated
+    tokens (implicit AND between tokens in FTS5 default mode is not actually
+    AND — it's "match any token in document"; that's the recall-friendly
+    behaviour we want at L1 since RRF fusion does the precision work).
+
+    Empty queries return ``'""'`` which matches nothing without raising.
+    """
+    cleaned = _FTS5_OPERATOR_RE.sub(" ", query)
+    tokens = cleaned.split()
+    return " ".join(tokens) if tokens else '""'
 
 
 def _now_iso() -> str:
@@ -212,6 +268,28 @@ class KnowledgeBase:
             _ = conn.execute("PRAGMA synchronous=NORMAL")
             _ = conn.executescript(_SCHEMA)
             self._run_migrations(conn)
+            self._backfill_fts(conn)
+
+    @staticmethod
+    def _backfill_fts(conn: sqlite3.Connection) -> None:
+        """Populate ``chunks_fts`` from existing chunk rows on first init.
+
+        Idempotent: if the FTS table already has rows, this is a no-op. On a
+        fresh database both tables are empty and the INSERT...SELECT yields
+        zero rows, also a no-op. Only needs to do real work on the first
+        deploy after the schema lands on a populated database.
+        """
+        row = conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()
+        if row and row[0] > 0:
+            return
+        _ = conn.execute(
+            """
+            INSERT INTO chunks_fts (title, content, doc_id, source)
+            SELECT COALESCE(title, ''), COALESCE(content, ''), doc_id, source
+            FROM documents
+            WHERE is_chunk = TRUE AND content IS NOT NULL AND content != ''
+            """
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
@@ -274,6 +352,21 @@ class KnowledgeBase:
                 },
             )
 
+            if content and is_chunk:
+                # Keep FTS5 in sync. Standard FTS5 (no content= option) owns
+                # its data, so DELETE-then-INSERT is the upsert pattern.
+                _ = conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))
+                _ = conn.execute(
+                    "INSERT INTO chunks_fts (title, content, doc_id, source) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        str(metadata.get("title") or ""),
+                        content,
+                        doc_id,
+                        str(metadata.get("source", "")),
+                    ),
+                )
+
         if content and is_chunk:
             chroma_meta: Metadata = {
                 "source": str(metadata.get("source", "")),
@@ -331,6 +424,19 @@ class KnowledgeBase:
                 }
             )
 
+        # Pre-compute the FTS5 chunk rows so we can do them in the same
+        # transaction as the documents table write.
+        fts_chunk_rows: list[tuple[str, str, str, str]] = [
+            (
+                str(metadata.get("title") or ""),
+                content,
+                doc_id,
+                str(metadata.get("source", "")),
+            )
+            for doc_id, content, metadata in items
+            if content and metadata.get("is_chunk", False)
+        ]
+
         with self._connect() as conn:
             _ = conn.executemany(
                 """
@@ -345,6 +451,16 @@ class KnowledgeBase:
                 """,
                 rows,
             )
+            if fts_chunk_rows:
+                fts_doc_ids = [(row[2],) for row in fts_chunk_rows]
+                _ = conn.executemany(
+                    "DELETE FROM chunks_fts WHERE doc_id = ?", fts_doc_ids
+                )
+                _ = conn.executemany(
+                    "INSERT INTO chunks_fts (title, content, doc_id, source) "
+                    "VALUES (?, ?, ?, ?)",
+                    fts_chunk_rows,
+                )
 
         # --- ChromaDB: batch upsert for chunks only ---
         chroma_ids: list[str] = []
@@ -378,9 +494,10 @@ class KnowledgeBase:
             )
 
     def delete_document(self, doc_id: str) -> None:
-        """Delete a document from both SQLite and ChromaDB."""
+        """Delete a document from SQLite (incl. FTS5) and ChromaDB."""
         with self._connect() as conn:
             _ = conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+            _ = conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))
 
         with contextlib.suppress(Exception):
             # ChromaDB raises if the ID doesn't exist; that's fine.
@@ -393,6 +510,7 @@ class KnowledgeBase:
         with self._connect() as conn:
             cursor = conn.execute("DELETE FROM documents WHERE source = ?", (source_name,))
             count = cursor.rowcount
+            _ = conn.execute("DELETE FROM chunks_fts WHERE source = ?", (source_name,))
 
         if ids_to_delete:
             with contextlib.suppress(Exception):
@@ -407,16 +525,16 @@ class KnowledgeBase:
         )
         return {str(row["doc_id"]) for row in rows}
 
-    def search(
+    def _dense_search(
         self,
         query: str,
         n_results: int = 10,
         source_filter: str | None = None,
     ) -> list[SearchResult]:
-        """Semantic search via ChromaDB.
+        """Dense leg of L1: ChromaDB cosine over chunk embeddings.
 
-        Returns a list of dicts with keys: doc_id, content, metadata, score.
-        score is the distance returned by ChromaDB (lower = more similar).
+        Returns chunk-level results ordered by cosine distance ascending
+        (lower = more similar). The score field holds the raw distance.
         """
         where: Where | None = None
         if source_filter:
@@ -452,6 +570,124 @@ class KnowledgeBase:
                 )
             )
 
+        return output
+
+    def _bm25_search_chunks(
+        self,
+        query: str,
+        n_results: int = _RRF_CANDIDATE_K,
+        source_filter: str | None = None,
+    ) -> list[SearchResult]:
+        """Lexical leg of L1: SQLite FTS5 BM25 over chunk content + title.
+
+        Returns chunk-level results ordered by BM25 ascending (FTS5's
+        ``bm25()`` returns negative floats; lower = better match). The score
+        field holds the raw BM25 value.
+        """
+        match_expr = _sanitize_fts_query(query)
+        if match_expr == '""':
+            return []
+
+        sql = (
+            "SELECT doc_id, source, title, content, "
+            "bm25(chunks_fts, ?, ?) AS score "
+            "FROM chunks_fts "
+            "WHERE chunks_fts MATCH ?"
+        )
+        params: list[object] = [_BM25_TITLE_WEIGHT, _BM25_CONTENT_WEIGHT, match_expr]
+        if source_filter:
+            sql += " AND source = ?"
+            params.append(source_filter)
+        sql += " ORDER BY score LIMIT ?"
+        params.append(n_results)
+
+        try:
+            with self._connect() as conn:
+                rows = cast("list[sqlite3.Row]", conn.execute(sql, params).fetchall())
+        except sqlite3.OperationalError:
+            # Defensive: an unexpected FTS5 syntax error. Should not happen
+            # after _sanitize_fts_query but fail safe rather than 500ing.
+            logger.exception(
+                "FTS5 BM25 query failed; returning empty results.",
+                extra={"event": "bm25_search_failed", "query": query},
+            )
+            return []
+
+        return [
+            SearchResult(
+                doc_id=str(row["doc_id"]),
+                content=str(row["content"] or ""),
+                metadata={
+                    "source": str(row["source"] or ""),
+                    "title": str(row["title"] or ""),
+                },
+                score=float(row["score"]),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _rrf_fuse(
+        ranked_lists: list[list[SearchResult]], k: int = _RRF_K,
+    ) -> list[tuple[str, float]]:
+        """Reciprocal Rank Fusion of multiple ranked candidate lists.
+
+        Each list is assumed to be ordered best-first. RRF score for a doc_id
+        is ``sum(1 / (k + rank))`` over every list it appears in (1-indexed).
+        Returns ``[(doc_id, rrf_score)]`` sorted by score descending.
+
+        k=60 is the standard default (Cormack et al. 2009). Sidesteps the
+        score-scale problem between cosine distance and BM25 logits — only
+        rank position matters.
+        """
+        scores: dict[str, float] = {}
+        for ranked in ranked_lists:
+            for rank, result in enumerate(ranked, start=1):
+                doc_id = result["doc_id"]
+                scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+        return sorted(scores.items(), key=lambda item: item[1], reverse=True)
+
+    def search(
+        self,
+        query: str,
+        n_results: int = 10,
+        source_filter: str | None = None,
+    ) -> list[SearchResult]:
+        """Hybrid chunk-level search: BM25 + dense, fused with RRF.
+
+        Used by the chat agent's ``search_docs`` tool. Returns chunk-level
+        results ordered by RRF score descending. The score field holds the
+        RRF score (higher = better) — the inverse of the legacy ChromaDB
+        distance scale.
+        """
+        dense = self._dense_search(
+            query, n_results=_RRF_CANDIDATE_K, source_filter=source_filter,
+        )
+        bm25 = self._bm25_search_chunks(
+            query, n_results=_RRF_CANDIDATE_K, source_filter=source_filter,
+        )
+
+        # Build a lookup of doc_id → SearchResult. Prefer the dense entry for
+        # content/metadata when a doc appears in both lists (its content is
+        # the actual chunk text Chroma indexed; BM25 returns the same text but
+        # via a different round-trip).
+        by_id: dict[str, SearchResult] = {r["doc_id"]: r for r in bm25}
+        by_id.update({r["doc_id"]: r for r in dense})
+
+        fused = self._rrf_fuse([dense, bm25])
+        output: list[SearchResult] = []
+        for doc_id, rrf_score in fused[:n_results]:
+            base = by_id.get(doc_id)
+            if base is None:
+                continue
+            output.append(
+                SearchResult(
+                    doc_id=base["doc_id"],
+                    content=base["content"],
+                    metadata=base["metadata"],
+                    score=rrf_score,
+                )
+            )
         return output
 
     def query_documents(
@@ -621,11 +857,16 @@ class KnowledgeBase:
                         new_name,
                     )
 
-        # Migrate SQLite — update doc_id and source for each row
+        # Migrate SQLite — update doc_id and source for each row, including
+        # the chunks_fts shadow rows.
         with self._connect() as conn:
             for old_id, new_id in id_map.items():
                 _ = conn.execute(
                     "UPDATE documents SET doc_id = ?, source = ? WHERE doc_id = ?",
+                    (new_id, new_name, old_id),
+                )
+                _ = conn.execute(
+                    "UPDATE chunks_fts SET doc_id = ?, source = ? WHERE doc_id = ?",
                     (new_id, new_name, old_id),
                 )
 
@@ -712,103 +953,72 @@ class KnowledgeBase:
             )
         return tree
 
-    def _keyword_search_title_path(
-        self,
-        query: str,
-        source_filter: str | None = None,
-        limit: int = 20,
-    ) -> list[dict[str, _Scalar]]:
-        """Keyword search on title and file_path via SQLite LIKE.
-
-        Returns parent documents whose title or file_path contain the query
-        (case-insensitive). Results are given a synthetic score of 0.5 so they
-        sort after strong semantic matches but before weak ones.
-        """
-        sql = """
-            SELECT doc_id, source, file_path, title, created_at, modified_at,
-                   SUBSTR(content, 1, 200) AS snippet
-            FROM documents
-            WHERE (is_chunk = FALSE OR chunk_index IS NULL)
-              AND (title LIKE :pattern OR file_path LIKE :pattern)
-        """
-        params: dict[str, str | int] = {"pattern": f"%{query}%"}
-        if source_filter:
-            sql += " AND source = :source"
-            params["source"] = source_filter
-        sql += " ORDER BY modified_at DESC LIMIT :limit"
-        params["limit"] = limit
-
-        with self._connect() as conn:
-            result_rows = cast(
-                "list[sqlite3.Row]", conn.execute(sql, params).fetchall()
-            )
-
-        return [
-            {
-                "doc_id": str(row["doc_id"]),
-                "source": str(row["source"]),
-                "file_path": str(row["file_path"]),
-                "title": str(row["title"]),
-                "created_at": row["created_at"],
-                "modified_at": row["modified_at"],
-                "score": 0.5,
-                "snippet": str(row["snippet"] or ""),
-            }
-            for row in result_rows
-        ]
-
     def search_documents(
         self,
         query: str,
         n_results: int = 20,
         source_filter: str | None = None,
     ) -> list[dict[str, _Scalar]]:
-        """Search and return parent document metadata (deduplicated from chunk hits).
+        """Hybrid parent-doc search: BM25 + dense + RRF, deduplicated to parents.
 
-        Combines ChromaDB semantic search on chunks with keyword search on
-        title and file_path, then deduplicates and limits to n_results.
+        L1 fuses dense and BM25 candidates with RRF; the top
+        ``_L1_OUTPUT_SIZE`` chunks are passed to L2 rerank (wired in by
+        ``docserver.reranker``) — until the reranker module ships, the
+        post-fusion chunk order is used directly. Chunks are then deduped to
+        their parent docs (best-scoring chunk wins) and the top ``n_results``
+        parents are returned.
+
+        The returned ``score`` field is the RRF score (higher = better) — a
+        contract change from the legacy ChromaDB-distance scale.
         """
-        search_results = self.search(query, n_results=n_results * 2, source_filter=source_filter)
+        dense = self._dense_search(
+            query, n_results=_RRF_CANDIDATE_K, source_filter=source_filter,
+        )
+        bm25 = self._bm25_search_chunks(
+            query, n_results=_RRF_CANDIDATE_K, source_filter=source_filter,
+        )
+
+        by_id: dict[str, SearchResult] = {r["doc_id"]: r for r in bm25}
+        by_id.update({r["doc_id"]: r for r in dense})
+
+        fused = self._rrf_fuse([dense, bm25])
+        l1_top: list[tuple[str, float, SearchResult]] = []
+        for doc_id, rrf_score in fused[:_L1_OUTPUT_SIZE]:
+            base = by_id.get(doc_id)
+            if base is None:
+                continue
+            l1_top.append((doc_id, rrf_score, base))
+
+        # L2 rerank goes here once docserver.reranker lands. For now, the
+        # post-fusion chunk order is used directly.
 
         seen_parents: set[str] = set()
         parent_docs: list[dict[str, _Scalar]] = []
-
-        for result in search_results:
-            doc_id = result["doc_id"]
+        for doc_id, score, chunk in l1_top:
             parent_id = doc_id.split("#chunk")[0] if "#chunk" in doc_id else doc_id
-
             if parent_id in seen_parents:
                 continue
             seen_parents.add(parent_id)
 
             doc = self.get_document(parent_id)
-            if doc:
-                parent_docs.append(
-                    {
-                        "doc_id": doc["doc_id"],
-                        "source": doc["source"],
-                        "file_path": doc["file_path"],
-                        "title": doc["title"],
-                        "created_at": doc["created_at"],
-                        "modified_at": doc["modified_at"],
-                        "score": result["score"],
-                        "snippet": str(result["content"])[:200],
-                    }
-                )
+            if doc is None:
+                continue
+            parent_docs.append(
+                {
+                    "doc_id": doc["doc_id"],
+                    "source": doc["source"],
+                    "file_path": doc["file_path"],
+                    "title": doc["title"],
+                    "created_at": doc["created_at"],
+                    "modified_at": doc["modified_at"],
+                    "score": score,
+                    "snippet": str(chunk["content"])[:200],
+                }
+            )
+            if len(parent_docs) >= n_results:
+                break
 
-        # Complement with keyword matches on title and file_path
-        keyword_hits = self._keyword_search_title_path(
-            query, source_filter=source_filter, limit=n_results,
-        )
-        for hit in keyword_hits:
-            if hit["doc_id"] not in seen_parents:
-                seen_parents.add(str(hit["doc_id"]))
-                parent_docs.append(hit)
-
-        # Sort by score (lower = more relevant for ChromaDB distances)
-        parent_docs.sort(key=lambda d: float(d.get("score", 0) or 0))
-
-        return parent_docs[:n_results]
+        return parent_docs
 
     def get_sources_summary(self) -> list[SourceSummary]:
         """Return per-source summary: source, file_count, chunk_count, last_indexed."""

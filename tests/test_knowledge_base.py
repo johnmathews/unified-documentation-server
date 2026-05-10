@@ -750,94 +750,56 @@ def test_upsert_documents_batch_replaces_existing(kb):
 
 
 # ---------------------------------------------------------------------------
-# Keyword search on title and file_path
+# Hybrid L1 search: BM25 (FTS5) + dense (ChromaDB) + RRF fusion
 # ---------------------------------------------------------------------------
 
 
-def test_keyword_search_title_path_matches_title(kb):
-    """_keyword_search_title_path should find docs whose title contains the query."""
+def test_bm25_finds_rare_token(kb):
+    """BM25 leg surfaces a rare named entity that dense search would miss.
+
+    Reproduces the strava failure mode that motivated the hybrid pipeline:
+    a chunk literally containing "strava" wins over a semantically-adjacent
+    chunk that never says the word.
+    """
     kb.upsert_document(
-        "src:guide.md",
-        "Some body content about unrelated topics.",
-        {"source": "src", "file_path": "guide.md", "title": "Docker Deployment Guide", "is_chunk": False},
-    )
-
-    results = kb._keyword_search_title_path("Docker")
-    assert len(results) == 1
-    assert results[0]["doc_id"] == "src:guide.md"
-    assert results[0]["title"] == "Docker Deployment Guide"
-
-
-def test_keyword_search_title_path_matches_file_path(kb):
-    """_keyword_search_title_path should find docs whose file_path contains the query."""
-    kb.upsert_document(
-        "src:networking/ports.md",
-        "Body text about other things.",
-        {"source": "src", "file_path": "networking/ports.md", "title": "Port Config", "is_chunk": False},
-    )
-
-    results = kb._keyword_search_title_path("networking")
-    assert len(results) == 1
-    assert results[0]["doc_id"] == "src:networking/ports.md"
-
-
-def test_keyword_search_title_path_excludes_chunks(kb):
-    """_keyword_search_title_path should only return parent documents, not chunks."""
-    kb.upsert_document(
-        "src:guide.md",
-        "",
-        {"source": "src", "file_path": "guide.md", "title": "Docker Guide", "is_chunk": False},
-    )
-    kb.upsert_document(
-        "src:guide.md#chunk0",
-        "Docker content",
+        "src:strava.md#chunk0",
+        "Imported a Strava activity for tracking the cycling commute.",
         {
             "source": "src",
-            "file_path": "guide.md",
-            "title": "Docker Guide",
+            "file_path": "strava.md",
+            "title": "Strava import",
             "chunk_index": 0,
+            "total_chunks": 1,
+            "is_chunk": True,
+        },
+    )
+    kb.upsert_document(
+        "src:webapp.md#chunk0",
+        "Vue 3 frontend for the journal analysis tool with OCR correction.",
+        {
+            "source": "src",
+            "file_path": "webapp.md",
+            "title": "Webapp",
+            "chunk_index": 0,
+            "total_chunks": 1,
             "is_chunk": True,
         },
     )
 
-    results = kb._keyword_search_title_path("Docker")
-    assert len(results) == 1
-    assert "#chunk" not in results[0]["doc_id"]
+    results = kb._bm25_search_chunks("strava")
+    assert results, "BM25 should return at least one result for 'strava'"
+    assert results[0]["doc_id"] == "src:strava.md#chunk0"
+    assert "strava" in results[0]["content"].lower()
 
 
-def test_keyword_search_title_path_with_source_filter(kb):
-    """_keyword_search_title_path should respect source_filter."""
+def test_bm25_title_match(kb):
+    """BM25 weights title heavily so title-only matches still surface."""
     kb.upsert_document(
-        "alpha:guide.md",
-        "",
-        {"source": "alpha", "file_path": "guide.md", "title": "Docker Guide", "is_chunk": False},
-    )
-    kb.upsert_document(
-        "beta:guide.md",
-        "",
-        {"source": "beta", "file_path": "guide.md", "title": "Docker Tutorial", "is_chunk": False},
-    )
-
-    results = kb._keyword_search_title_path("Docker", source_filter="alpha")
-    assert len(results) == 1
-    assert results[0]["source"] == "alpha"
-
-
-def test_search_documents_includes_title_only_matches(kb):
-    """search_documents should find docs where the query appears only in the title."""
-    # Parent doc with a distinctive title but unrelated body
-    kb.upsert_document(
-        "src:xyzzy.md",
-        "This document has completely unrelated content about gardening and flowers.",
-        {"source": "src", "file_path": "xyzzy.md", "title": "Kubernetes Cluster Setup", "is_chunk": False},
-    )
-    # Chunk with unrelated content (so semantic search won't match "Kubernetes")
-    kb.upsert_document(
-        "src:xyzzy.md#chunk0",
-        "This document has completely unrelated content about gardening and flowers.",
+        "src:doc.md#chunk0",
+        "This text is entirely about gardening and flowers.",
         {
             "source": "src",
-            "file_path": "xyzzy.md",
+            "file_path": "doc.md",
             "title": "Kubernetes Cluster Setup",
             "chunk_index": 0,
             "total_chunks": 1,
@@ -845,9 +807,190 @@ def test_search_documents_includes_title_only_matches(kb):
         },
     )
 
-    results = kb.search_documents("Kubernetes")
-    doc_ids = [r["doc_id"] for r in results]
-    assert "src:xyzzy.md" in doc_ids
+    results = kb._bm25_search_chunks("Kubernetes")
+    assert len(results) == 1
+    assert results[0]["doc_id"] == "src:doc.md#chunk0"
+
+
+def test_bm25_source_filter(kb):
+    """BM25 leg respects source_filter."""
+    for src in ("alpha", "beta"):
+        kb.upsert_document(
+            f"{src}:doc.md#chunk0",
+            "Identical content about Docker networking.",
+            {
+                "source": src,
+                "file_path": "doc.md",
+                "title": "Docker",
+                "chunk_index": 0,
+                "is_chunk": True,
+            },
+        )
+
+    results = kb._bm25_search_chunks("Docker", source_filter="alpha")
+    assert len(results) == 1
+    assert results[0]["metadata"]["source"] == "alpha"
+
+
+def test_bm25_query_sanitization_no_syntax_error(kb):
+    """Raw user queries with FTS5 operators must not raise."""
+    kb.upsert_document(
+        "src:doc.md#chunk0",
+        "Some content about foo and bar.",
+        {
+            "source": "src",
+            "file_path": "doc.md",
+            "title": "Doc",
+            "chunk_index": 0,
+            "is_chunk": True,
+        },
+    )
+
+    # None of these should raise.
+    _ = kb._bm25_search_chunks('"foo*bar"')
+    _ = kb._bm25_search_chunks("(unclosed paren")
+    _ = kb._bm25_search_chunks("-leading-minus")
+    _ = kb._bm25_search_chunks("")  # empty query
+    _ = kb._bm25_search_chunks("   ")  # whitespace-only
+
+
+def test_delete_propagates_to_fts(kb):
+    """Deleting a chunk removes it from the FTS index."""
+    kb.upsert_document(
+        "src:doc.md#chunk0",
+        "Unique zxqwerty content for finding.",
+        {
+            "source": "src",
+            "file_path": "doc.md",
+            "title": "Doc",
+            "chunk_index": 0,
+            "is_chunk": True,
+        },
+    )
+    assert kb._bm25_search_chunks("zxqwerty"), "BM25 should find the chunk before delete"
+
+    kb.delete_document("src:doc.md#chunk0")
+    assert kb._bm25_search_chunks("zxqwerty") == [], "BM25 should not find chunk after delete"
+
+
+def test_delete_source_propagates_to_fts(kb):
+    """Deleting a source removes its chunks from FTS."""
+    kb.upsert_document(
+        "alpha:doc.md#chunk0",
+        "Unique zxqwerty content.",
+        {"source": "alpha", "file_path": "doc.md", "title": "Doc",
+         "chunk_index": 0, "is_chunk": True},
+    )
+    kb.upsert_document(
+        "beta:doc.md#chunk0",
+        "Unique zxqwerty content.",
+        {"source": "beta", "file_path": "doc.md", "title": "Doc",
+         "chunk_index": 0, "is_chunk": True},
+    )
+
+    kb.delete_source_documents("alpha")
+
+    results = kb._bm25_search_chunks("zxqwerty")
+    sources_returned = {str(r["metadata"]["source"]) for r in results}
+    assert sources_returned == {"beta"}
+
+
+def test_fts_backfill_on_existing_db(tmp_path):
+    """A chunks_fts table that starts empty is backfilled from documents on init."""
+    kb_dir = tmp_path / "data"
+    kb1 = KnowledgeBase(str(kb_dir))
+    kb1.upsert_document(
+        "src:doc.md#chunk0",
+        "Unique zxqwerty token in the chunk body.",
+        {"source": "src", "file_path": "doc.md", "title": "Doc",
+         "chunk_index": 0, "is_chunk": True},
+    )
+    kb1.close()
+
+    # Wipe FTS to simulate a pre-FTS database, then re-init.
+    import sqlite3
+    with sqlite3.connect(str(kb_dir / "documents.db")) as conn:
+        _ = conn.execute("DELETE FROM chunks_fts")
+
+    kb2 = KnowledgeBase(str(kb_dir))
+    try:
+        results = kb2._bm25_search_chunks("zxqwerty")
+        assert len(results) == 1
+        assert results[0]["doc_id"] == "src:doc.md#chunk0"
+    finally:
+        kb2.close()
+
+
+def test_rrf_fuse_math():
+    """RRF score = sum(1/(k+rank)) across lists; sorted descending."""
+    a: list = [
+        {"doc_id": "x", "content": "", "metadata": {}, "score": 0.0},
+        {"doc_id": "y", "content": "", "metadata": {}, "score": 0.0},
+    ]
+    b: list = [
+        {"doc_id": "y", "content": "", "metadata": {}, "score": 0.0},
+        {"doc_id": "z", "content": "", "metadata": {}, "score": 0.0},
+    ]
+    fused = KnowledgeBase._rrf_fuse([a, b], k=60)
+
+    expected = {
+        "x": 1 / 61,                   # rank 1 in a only
+        "y": 1 / 61 + 1 / 62,          # rank 1 in b, rank 2 in a
+        "z": 1 / 62,                   # rank 2 in b only
+    }
+    got = dict(fused)
+    for doc_id, score in expected.items():
+        assert got[doc_id] == pytest.approx(score)
+
+    # y appears in both lists so should rank first; z and x are close.
+    assert fused[0][0] == "y"
+
+
+def test_search_documents_strava_reproduction(kb):
+    """Headline acceptance test: q='strava' with a misleading semantic neighbour.
+
+    Reproduces the prod bug where pure-vector search ranked a CLAUDE.md-like
+    doc above the actual strava-mentioning chunk. After the hybrid pipeline,
+    the strava doc must be top-ranked.
+    """
+    # Decoy: a CLAUDE.md-like parent + chunk that is semantically near
+    # journal/fitness queries but never says "strava".
+    kb.upsert_document(
+        "journal:CLAUDE.md",
+        "",
+        {"source": "journal", "file_path": "CLAUDE.md",
+         "title": "Journal Webapp", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "journal:CLAUDE.md#chunk0",
+        "Vue 3 frontend for the Journal Analysis Tool. Displays journal "
+        "entries, enables OCR correction, and will include dashboards.",
+        {"source": "journal", "file_path": "CLAUDE.md",
+         "title": "Journal Webapp", "chunk_index": 0, "total_chunks": 1,
+         "is_chunk": True},
+    )
+    # Real answer: a journal entry that literally mentions Strava.
+    kb.upsert_document(
+        "journal:journal/strava-import.md",
+        "",
+        {"source": "journal", "file_path": "journal/strava-import.md",
+         "title": "Strava import", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "journal:journal/strava-import.md#chunk0",
+        "Imported a Strava activity for the morning cycling commute. The "
+        "OAuth refresh flow is now wired up and the activity stream "
+        "deduplicates against existing rides.",
+        {"source": "journal", "file_path": "journal/strava-import.md",
+         "title": "Strava import", "chunk_index": 0, "total_chunks": 1,
+         "is_chunk": True},
+    )
+
+    results = kb.search_documents("strava", source_filter="journal")
+    assert results, "search_documents should return at least one hit"
+    assert results[0]["doc_id"] == "journal:journal/strava-import.md", (
+        f"Top result should be the strava doc, got {results[0]['doc_id']}"
+    )
 
 
 # ------------------------------------------------------------------

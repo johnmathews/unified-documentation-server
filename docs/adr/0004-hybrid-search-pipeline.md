@@ -67,6 +67,15 @@ No feature flag. Both `search()` (chat agent) and `search_documents()`
 
 ## Consequences
 
+**Update (2026-05-10, post-deploy):** the initial release shipped with
+`_RERANK_BATCH_SIZE = 50`, which spiked transient activation memory past
+the 1024 MB cgroup ceiling on every search and caused immediate OOM kills
+on `infra:8085`. Dropped to 8 (matches the embedding model's batch size,
+~5–10 ms throughput cost at 50 L1 candidates). See journal entry
+`260510-hybrid-search-pipeline.md` for the full post-mortem. The
+`_RERANK_BATCH_SIZE` knob is now documented in
+`docs/architecture.md`.
+
 Good:
 
 - Top result for `q=strava` becomes a doc that actually mentions "strava".

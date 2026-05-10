@@ -198,6 +198,19 @@ Configuration constants (in `knowledge_base.py`):
 | `_RRF_K` | 60 | RRF damping constant |
 | `_BM25_TITLE_WEIGHT` | 2.0 | FTS5 title column weight in `bm25()` |
 | `_BM25_CONTENT_WEIGHT` | 1.0 | FTS5 content column weight in `bm25()` |
+| `_RERANK_BATCH_SIZE` (in `reranker.py`) | 8 | Cross-encoder pairs per ONNX call. Bigger batch = fewer calls, higher peak activation memory. 8 mirrors `_DEFAULT_EMBEDDING_BATCH_SIZE` and keeps transient RSS under the 1024 MB cgroup ceiling. |
+
+**Memory:** the docserver container is capped at `mem_limit: 1024m`,
+`mem_reservation: 320m` (see `docker-compose.yml`). Both ONNX models load
+lazily on first search and stay resident: ~110 MB for mpnet, ~85 MB for
+the cross-encoder. Steady state once both are loaded is ~445 MB, leaving
+~580 MB headroom for transient activations and the ingestion subprocess.
+
+> **Operational note:** the prod deployment on `infra` uses a hand-rolled
+> compose at `/srv/infra/docker-compose.yml`, separate from this repo's
+> `docker-compose.yml`. Memory-limit changes need to be applied in both
+> places. The repo's compose is the canonical reference for new deployers
+> but the production VM does not pull it automatically.
 
 The score field on returned dicts is the cross-encoder logit (higher = better).
 If the reranker fails to load or score, `rerank()` catches the exception and

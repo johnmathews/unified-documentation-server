@@ -231,6 +231,15 @@ If you push changes to a source repo but the docserver logs keep showing `"All N
 3. First ingestion runs immediately on startup -- if the container just started, wait for the start period (up to 60s) and check again.
 4. Check logs for ingestion errors on the source you expect results from.
 5. Look for `no_files_matched` events which include directory contents and pattern diagnostics.
+6. **Top result doesn't contain the literal query string?** That's not necessarily a bug. The hybrid search pipeline runs BM25 and dense in parallel, fused with RRF, then reranked. If the source you filtered by has zero chunks containing the literal token, BM25 contributes nothing and the dense leg returns its nearest semantic neighbours — none of which need to contain the literal string. Check directly with: `docker exec documentation-server python3 -c 'import sqlite3; print(sqlite3.connect("/data/documents.db").execute("SELECT COUNT(*) FROM chunks_fts WHERE source=? AND chunks_fts MATCH ?", ("SOURCE_NAME", "TOKEN")).fetchone()[0])'`. If the count is 0, the source genuinely lacks that term.
+
+### Container OOM during search
+
+If `docker events --filter event=oom` shows OOM kills coinciding with `/api/search` requests:
+
+1. Confirm `mem_limit` is **at least 1024 MB** in both `docker-compose.yml` *and* the prod compose at `/srv/infra/docker-compose.yml` on infra. Both ONNX models (mpnet ~110 MB + reranker ~85 MB) plus their transient activation tensors need more than 768 MB.
+2. If memory is at 1024 MB and OOMs persist: reduce `_RERANK_BATCH_SIZE` in `src/docserver/reranker.py` (default 8). Smaller batch = lower transient activation memory.
+3. If the ingestion subprocess is running concurrently with a search, peak memory can exceed the cgroup. Adjust `DOCSERVER_POLL_INTERVAL` to make this collision rarer if you cannot raise the cap.
 
 ### Container shows as unhealthy
 

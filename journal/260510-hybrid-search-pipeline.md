@@ -88,6 +88,71 @@ mentions "strava"; asserts the top result is the strava doc.
 Full suite: 456 passing (was 450 before; +6 reranker tests, +7 hybrid
 tests, –4 deleted keyword-search-title-path tests).
 
+## Post-deploy: OOM on first search, batch-size fix
+
+First deploy to `infra:8085` came up healthy on `/health` but every
+`/api/search` killed the container with `exitCode=137` (cgroup OOM).
+Three OOM events visible from `docker events --filter event=oom`. /health
+recovered each time because the container restarted automatically.
+
+Root cause: I shipped `_RERANK_BATCH_SIZE = 50` in `reranker.py`,
+processing all L1 candidates in a single ONNX call. At seq_len up to 512
+tokens, the activation tensors for one 50-pair forward pass spike memory
+into the hundreds of MB on top of the resident model weights. Combined
+with the freshly-loaded mpnet embedder (~110 MB) and the just-finished
+ingestion-worker subprocess that hadn't fully released its RSS, peak
+transient memory tipped over the 1 GB cgroup ceiling.
+
+The embedding model uses `_DEFAULT_EMBEDDING_BATCH_SIZE = 8` for the same
+reason — `embedding.py` has a comment explaining the activation-memory
+math. I should have mirrored that constant. Lesson: when copying patterns
+from a sibling module, copy the *reasoning*, not just the surface API.
+
+Fix in commit 7a7a563: `_RERANK_BATCH_SIZE = 50 → 8`. Throughput cost at
+50 candidates is ~5–10 ms (7 batches instead of 1). Test suite didn't
+catch this because the existing reranker fixtures use small synthetic
+chunks; the activation-memory issue only manifests with realistic
+chunk sizes.
+
+Test note: the test suite verifies *correctness* of rerank ordering but
+not its *resource envelope*. A stress test that reranks N=50 chunks at
+seq_len ≈ 400 chars with a memory cap (e.g. via `resource.setrlimit`)
+would have caught this. Worth adding if memory regressions become
+recurring.
+
+Operational note: the prod compose lives at
+`/srv/infra/docker-compose.yml` on the infra VM and is hand-rolled —
+it does not pull from this repo's `docker-compose.yml`. The `mem_limit`
+bump from 768 MB → 1024 MB had to be applied manually to the prod
+compose alongside `docker compose pull && up -d documentation-server`.
+Worth flagging in `docs/operations.md` if the drift becomes a recurring
+source of confusion.
+
+## Post-deploy verification
+
+After redeploying with the batch-size fix and 1024 MB cap:
+
+```
+docker inspect documentation-server
+  → image=sha256:f7ac69b15304…  RestartCount=0  health=healthy
+
+curl http://localhost:8085/api/search?q=strava&source=journal-insights-server&limit=5
+  → HTTP 200, 3.7 s warm
+  → Top 5 results all contain "strava" in snippet
+  → Rerank logits: 4.70, 4.36, 3.76, 3.56, 3.37 (high relevance)
+  → Top result: docs/fitness-operations.md (Strava OAuth deployment section)
+```
+
+Note on the original repro: searching `q=strava&source=journal-insights-webapp`
+(the source in the original bug report) returns chunks that *don't* contain
+"strava" — but that's because the `journal-insights-webapp` source is a
+pure Vue frontend with **zero chunks** mentioning "strava" at all
+(strava integration code lives in `journal-insights-server`). The
+original bug report's premise was reachable only when the source
+contained the literal token; with hybrid search, BM25 returns 0 hits and
+the dense leg returns its nearest semantic neighbours, which the
+reranker then orders by relevance. Working as designed.
+
 ## Follow-ups
 
 - Watch first-search latency in prod logs after deploy. Target: <2 s cold

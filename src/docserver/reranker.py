@@ -35,7 +35,13 @@ _MODEL_REPO = "cross-encoder/ms-marco-MiniLM-L6-v2"
 _MODEL_REVISION = "c5ee24cb16019beea0893ab7796b1df96625c6b8"
 
 _MAX_SEQ_LENGTH = 512
-_RERANK_BATCH_SIZE = 50
+# Activation memory is roughly batch * seq_len * hidden * layers * bytes. At
+# batch=50 and seq_len=512 the transient tensors tip the docserver container
+# (1024 MB cgroup) into OOM during the first search after the embedding model
+# loads. Batch=8 matches the embedding model's _DEFAULT_EMBEDDING_BATCH_SIZE
+# and keeps peak activation comfortably under 100 MB. Trades ~5-10 ms of
+# throughput at 50 candidates for crash-free serving on the infra VM.
+_RERANK_BATCH_SIZE = 8
 
 _HF_FILES = {
     "model.onnx": "onnx/model_quint8_avx2.onnx",

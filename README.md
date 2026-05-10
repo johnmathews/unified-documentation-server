@@ -40,9 +40,12 @@ process owning the database. The HTTP server fills that role.
 
 ## MCP Tools
 
-### `search_docs` -- Semantic search
+### `search_docs` -- Hybrid search with reranking
 
-Find documentation relevant to a natural language question.
+Find documentation relevant to a natural language question. Two-stage hybrid
+pipeline: BM25 (SQLite FTS5) + dense vector (ChromaDB) candidates fused with
+Reciprocal Rank Fusion, then reranked by a cross-encoder for final ordering.
+Returns chunk-level results.
 
 | Parameter     | Type  | Default | Description                                      |
 | ------------- | ----- | ------- | ------------------------------------------------ |
@@ -272,9 +275,16 @@ uv run pytest tests/ -v
    code fences are kept intact.
 
 4. **Storage.** Parent document metadata goes into SQLite (in WAL mode so the docserver can read while the worker
-   writes). Document chunks are embedded client-side via ONNX Runtime and stored in the ChromaDB sidecar service for
-   semantic search; only pre-computed vectors cross the wire, so the sidecar stays small (~256 MB).
+   writes). Each chunk lands in three places: the SQLite `documents` table (raw content + metadata), the
+   `chunks_fts` FTS5 virtual table (BM25 inverted index over content + title), and the ChromaDB sidecar (dense
+   embeddings). Only pre-computed vectors cross the wire to Chroma, so the sidecar stays small (~256 MB).
 
-5. **Serving.** The FastMCP server exposes tools over streamable HTTP. Agents can search semantically, query by
+5. **Search.** Two-stage hybrid pipeline. **L1**: SQLite FTS5 BM25 and ChromaDB cosine each return their top-100
+   candidates; results are merged with Reciprocal Rank Fusion (k=60) and the top 50 chunks pass to L2. **L2**: a
+   cross-encoder (`ms-marco-MiniLM-L6-v2`, ONNX int8) reranks the candidates with full query–passage attention,
+   then dedup-to-parent picks the best chunk per parent. Both models are pre-baked into the Docker image so cold
+   start avoids any network download.
+
+6. **Serving.** The FastMCP server exposes tools over streamable HTTP. Agents can search hybrid-style, query by
    metadata, or retrieve specific documents. A `/health` endpoint returns indexing status (including the most recent
    worker cycle's RSS / duration) for container orchestration and operator visibility.

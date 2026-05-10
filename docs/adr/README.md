@@ -23,3 +23,4 @@ it is omitted.
 | 0001 | [Run ChromaDB as a sidecar service](0001-chroma-sidecar.md) | Accepted |
 | 0002 | [Run ingestion as a per-cycle subprocess](0002-ingestion-subprocess.md) | Accepted |
 | 0003 | [Soft startup probe for chat-model validity](0003-chat-model-startup-probe.md) | Accepted |
+| 0004 | [Hybrid search pipeline (BM25 + dense + cross-encoder rerank)](0004-hybrid-search-pipeline.md) | Accepted |

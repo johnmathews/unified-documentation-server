@@ -142,9 +142,71 @@ For tests, `KnowledgeBase` falls back to an in-process `PersistentClient`
 when `DOCSERVER_CHROMA_HOST` is unset. The test path is single-process so
 the sidecar is not needed.
 
-Stores chunk text with vector embeddings for semantic similarity search. Uses the **all-mpnet-base-v2** embedding model via ONNX Runtime (768 dimensions, ~500MB RAM, runs locally with no external API calls). The embedding model is loaded **client-side** (in the docserver and ingestion worker processes), not in the Chroma sidecar — only pre-computed vectors cross the wire. ONNX Runtime was chosen over PyTorch-based sentence-transformers to keep Docker images small (~650MB vs ~8GB) and build times fast. The Dockerfile uses a multi-stage build: the builder stage installs dependencies and downloads the model, then the final stage copies the result with `--chown` to avoid layer duplication. Unused onnxruntime transitive dependencies (sympy, mpmath) are stripped in the builder stage.
+Stores chunk text with vector embeddings for the **dense leg of L1** (see "Search Pipeline" below). Uses the **all-mpnet-base-v2** embedding model via ONNX Runtime (768 dimensions, ~110MB resident, runs locally with no external API calls). The embedding model is loaded **client-side** (in the docserver and ingestion worker processes), not in the Chroma sidecar — only pre-computed vectors cross the wire. ONNX Runtime was chosen over PyTorch-based sentence-transformers to keep Docker images small (~650MB vs ~8GB) and build times fast. The Dockerfile uses a multi-stage build: the builder stage installs dependencies and downloads the model, then the final stage copies the result with `--chown` to avoid layer duplication. Unused onnxruntime transitive dependencies (sympy, mpmath) are stripped in the builder stage.
 
 Only chunks are stored in ChromaDB. Parent docs are excluded since they have no content body. Each chunk's metadata in ChromaDB includes `source`, `file_path`, `title`, `chunk_index`, `total_chunks`, and `section_path` for filtering.
+
+## Search Pipeline
+
+`KnowledgeBase.search_documents()` and `KnowledgeBase.search()` (chunk-level,
+used by the chat agent) run a two-stage hybrid pipeline. See ADR 0004 for the
+decision rationale.
+
+```
+Query
+  │
+  ├─► L1a: SQLite FTS5 BM25         (top 100 chunks)
+  │     bm25(chunks_fts, 2.0, 1.0)  — title weighted 2x content
+  │
+  └─► L1b: ChromaDB cosine          (top 100 chunks)
+  │     all-mpnet-base-v2 (768d)
+  │
+  ▼
+RRF fusion (k=60) ──► top 50 chunks
+  │
+  ▼
+L2: cross-encoder/ms-marco-MiniLM-L6-v2 (ONNX int8)
+  │
+  ▼
+Dedup chunk → parent (best chunk wins)  ──►  top N parent docs
+```
+
+Why each stage exists:
+
+- **BM25 (L1a)** rescues queries on rare named entities and exact identifiers
+  (proper nouns, product names, version strings) where dense embeddings cluster
+  in the semantic neighbourhood without distinguishing the surface form. Title
+  is included in the FTS5 columns and weighted 2× the content, so title-only
+  matches still surface. Tokenizer: `unicode61 remove_diacritics 2` — no
+  stemming, so `Strava` matches `strava` matches `STRAVA`.
+- **Dense (L1b)** handles paraphrase and conceptual queries where the user's
+  wording differs from the document's wording. BM25 alone fails here.
+- **RRF fusion** combines the two ranked lists without requiring score
+  normalisation; only rank position matters. k=60 is the standard default.
+- **Cross-encoder (L2)** re-scores each candidate with full query–passage
+  attention, resolving cases where both BM25 and dense produce plausible but
+  wrong orderings. ms-marco-MiniLM-L6-v2 was chosen over heavier models (L12,
+  bge-reranker) and LLM rerankers: ~85 MB resident, ~80–150 ms for 50 pairs on
+  CPU, no API calls.
+
+Configuration constants (in `knowledge_base.py`):
+
+| Constant | Default | Effect |
+|---|---|---|
+| `_RRF_CANDIDATE_K` | 100 | Top-K returned by each L1 leg |
+| `_L1_OUTPUT_SIZE` | 50 | Candidates handed to L2 rerank |
+| `_RRF_K` | 60 | RRF damping constant |
+| `_BM25_TITLE_WEIGHT` | 2.0 | FTS5 title column weight in `bm25()` |
+| `_BM25_CONTENT_WEIGHT` | 1.0 | FTS5 content column weight in `bm25()` |
+
+The score field on returned dicts is the cross-encoder logit (higher = better).
+If the reranker fails to load or score, `rerank()` catches the exception and
+returns L1 RRF results unchanged — search never 500s because rerank is sick.
+
+**Operational note:** the `chunks_fts` virtual table is backfilled from
+existing chunk rows on first init after the schema lands on a populated
+database. The backfill is idempotent and runs in a single
+`INSERT INTO chunks_fts SELECT … FROM documents WHERE is_chunk = TRUE`.
 
 ## MCP Server
 
@@ -169,7 +231,7 @@ Built with FastMCP, exposes six tools over streamable HTTP. The server `instruct
 - `/api/tree` (GET) — Document tree organized by source and category. Each source has `root_docs` (root-level files like README.md), `docs` (files in subdirectories), `journal` (files under journal/), `engineering_team` (files under .engineering-team/), `learning_journal` (files under learning/), `research` (files under research/), `skills` (files under skills/), `runbooks` (files under runbooks/), and `pdf` (any file ending in .pdf).
 - `/api/documents/:doc_id` (GET) — Full document content reassembled from chunks.
 - `/api/files/:doc_id` (GET) — Raw file served from disk with correct MIME type and `Content-Disposition: inline`. Used by the UI to embed PDFs in an iframe. Includes path traversal protection.
-- `/api/search?q=&source=&limit=` (GET) — Semantic search via ChromaDB.
+- `/api/search?q=&source=&limit=` (GET) — Hybrid search (BM25 + dense via RRF, then cross-encoder rerank). See "Search Pipeline" above.
 - `/api/chat` (POST) — Agentic chat with tool use and token-efficient prompt caching. Uses Claude Opus 4 (`claude-opus-4-7` by default, configurable via `DOCSERVER_CHAT_MODEL` env var). At server startup the configured model is probed against the Anthropic Models API; if it does not resolve, the endpoint short-circuits with HTTP 503 (`chat_model_valid` on `/health` reflects the same state). Errors from the upstream API are mapped: `RateLimitError` → 429, `NotFoundError`/`BadRequestError` → 500 (server config error), `APIConnectionError`/`InternalServerError` → 502 (true gateway failure). The system prompt includes the current UTC date (computed at request time, not server startup) so the model has accurate temporal context for date-based queries. The agent has access to `search_docs`, `query_docs`, `get_document`, `list_sources`, and `get_bookmarks` tools and will proactively research across all indexed sources to answer questions. Accepts optional `doc_id` (current document), `page_context` (`{source?, category?}` for source/category pages), `conversation_id` (to continue a conversation), and `history` (message history). Returns `{reply, conversation_id}`. Conversations are persisted server-side in SQLite for review and resumption. Token usage is optimized via: Anthropic prompt caching (static instructions and tool definitions cached across loop iterations — cached tokens don't count toward ITPM rate limits), compact inventory context (per-source category counts only, not per-document listings), tool result truncation (search chunks capped at 300 chars, documents at 6000 chars, query results return key fields only), and automatic compaction of older tool results in the agentic loop to prevent linear token accumulation.
 - `/api/chat/stream` (POST) — SSE streaming version of `/api/chat`. Same request body, but returns a `text/event-stream` response with real-time progress events during the agentic tool-use loop. Event types: `status` (thinking/iteration updates), `tool_call` (before tool execution, includes tool name and input), `tool_result` (after execution, includes human-readable summary), `reply` (final response with conversation_id), `error` (on failure). Uses `sse-starlette` with 15-second ping keep-alive. Anthropic API calls are wrapped in `asyncio.to_thread` to avoid blocking the event loop.
 - `/api/conversations` (GET) — List saved conversations (id, title, created\_at, updated\_at, message\_count, preview), most recent first.

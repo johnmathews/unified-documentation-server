@@ -40,18 +40,22 @@ services:
         condition: service_healthy
     # Memory budget on a 1.95 GB host (infra VM) sharing RAM with the
     # observability stack (Loki, Grafana, Alloy, exporters):
-    #   - Server steady state ~250 MB (Python + FastMCP + Anthropic SDK + Chroma HTTP client)
-    #   - Search-time ONNX model load adds ~110 MB
-    #   - Ingestion worker subprocess can spike past 1 GB during embedding
-    # 768 MB caps the container below the VM's available memory so the
+    #   - Python + FastMCP + Anthropic SDK + Chroma HTTP client      ~250 MB
+    #   - Embedding model (all-mpnet-base-v2 ONNX, mmap)              ~110 MB on first search
+    #   - Reranker model (ms-marco-MiniLM-L6-v2 ONNX int8)             ~85 MB on first search
+    #   - Steady state once both models are resident                  ~445 MB
+    #   - Ingestion worker subprocess (separate process, separate cgroup
+    #     accounting) can spike past 1 GB during embedding batches.
+    # 1024 MB caps the container well below the VM's available memory so the
     # cgroup OOM kills the highest-RSS process (the worker subprocess) cleanly,
     # before the kernel global OOM fires and degrades the whole host.
-    # mem_reservation is the steady-state floor, NOT the peak — keep it low so
-    # Docker's scheduler doesn't pre-commit RAM that's only used during ingest.
+    # mem_reservation is the post-first-search floor, NOT the peak — keep it
+    # below steady state so Docker's scheduler does not pre-commit RAM only
+    # used during ingest.
     # Do NOT raise mem_limit above the VM's available RAM, otherwise the
     # cgroup limit can never trigger and every spike becomes a global OOM.
-    mem_limit: 768m
-    mem_reservation: 256m
+    mem_limit: 1024m
+    mem_reservation: 320m
     ports:
       - "8085:8080"
     volumes:

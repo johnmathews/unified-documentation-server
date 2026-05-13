@@ -328,7 +328,7 @@ def _merge_exclude_types(
     return merged or None
 
 
-def _execute_chat_tool(  # noqa: C901
+def _execute_chat_tool(
     kb: KnowledgeBase,
     tool_name: str,
     tool_input: dict[str, Any],  # pyright: ignore[reportExplicitAny]

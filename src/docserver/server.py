@@ -847,6 +847,48 @@ def create_mcp(config: Config) -> FastMCP:
             logger.exception("API tree failed.")
             return _cors_json({"error": "Internal error"}, 500)
 
+    @server.custom_route("/api/sources/tree", methods=["GET"])
+    async def api_sources_tree(_request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
+        """Return per-source file lists for every configured source.
+
+        The webapp builds the nested folder tree client-side by splitting
+        each ``file_path`` on ``/``. One network round-trip serves the
+        whole sidebar.
+        """
+        try:
+            kb = _get_kb()
+            # Iterate configured sources rather than only those with rows in
+            # the KB so newly-configured but not-yet-indexed sources still
+            # appear in the webapp sidebar.
+            payload = [
+                {"source": src.name, "files": kb.get_source_files(src.name)}
+                for src in config.sources
+            ]
+            return _cors_json({"sources": payload})
+        except Exception:
+            logger.exception("API sources tree (bulk) failed.")
+            return _cors_json({"error": "Internal error"}, 500)
+
+    @server.custom_route("/api/sources/{name}/tree", methods=["GET"])
+    async def api_source_tree(request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
+        """Return parent-doc file list for one source.
+
+        404 if the source is not configured. An empty file list (configured
+        source with nothing indexed yet) returns 200 with ``"files": []``.
+        """
+        try:
+            kb = _get_kb()
+            raw_name: str = str(request.path_params["name"])  # pyright: ignore[reportAny]
+            name = unquote(raw_name)
+            configured = {src.name for src in config.sources}
+            if name not in configured:
+                return _cors_json({"error": "Source not found"}, 404)
+            files = kb.get_source_files(name)
+            return _cors_json({"source": name, "files": files})
+        except Exception:
+            logger.exception("API source tree failed.")
+            return _cors_json({"error": "Internal error"}, 500)
+
     @server.custom_route("/api/documents/{doc_id:path}", methods=["GET"])
     async def api_get_document(request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         """Return a single document by ID (URL-encoded)."""

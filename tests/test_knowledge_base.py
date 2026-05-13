@@ -110,6 +110,71 @@ def test_get_sources_summary(kb):
     assert summary[0]["chunk_count"] == 1
 
 
+def test_get_source_files_returns_only_parents(kb):
+    kb.upsert_document(
+        "src:a.md",
+        "",
+        {"source": "src", "file_path": "a.md", "title": "A", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "src:a.md#chunk0",
+        "text",
+        {
+            "source": "src",
+            "file_path": "a.md",
+            "title": "A",
+            "chunk_index": 0,
+            "is_chunk": True,
+        },
+    )
+
+    files = kb.get_source_files("src")
+    assert [f["doc_id"] for f in files] == ["src:a.md"]
+    assert files[0]["file_path"] == "a.md"
+    assert files[0]["title"] == "A"
+
+
+def test_get_source_files_filters_by_source(kb):
+    kb.upsert_document(
+        "a:one.md", "", {"source": "a", "file_path": "one.md", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "a:two.md", "", {"source": "a", "file_path": "two.md", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "b:three.md",
+        "",
+        {"source": "b", "file_path": "three.md", "is_chunk": False},
+    )
+
+    files = kb.get_source_files("a")
+    assert [f["file_path"] for f in files] == ["one.md", "two.md"]
+
+    files_b = kb.get_source_files("b")
+    assert [f["file_path"] for f in files_b] == ["three.md"]
+
+    files_missing = kb.get_source_files("nonexistent")
+    assert files_missing == []
+
+
+def test_get_source_files_ordered_by_file_path(kb):
+    # Insert out of order; result should be sorted alphabetically by file_path.
+    kb.upsert_document(
+        "src:zeta.md", "", {"source": "src", "file_path": "zeta.md", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "src:alpha.md", "", {"source": "src", "file_path": "alpha.md", "is_chunk": False},
+    )
+    kb.upsert_document(
+        "src:docs/nested.md",
+        "",
+        {"source": "src", "file_path": "docs/nested.md", "is_chunk": False},
+    )
+
+    files = kb.get_source_files("src")
+    assert [f["file_path"] for f in files] == ["alpha.md", "docs/nested.md", "zeta.md"]
+
+
 def test_search_with_source_filter(kb):
     kb.upsert_document(
         "a:doc.md#chunk0",

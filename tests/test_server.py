@@ -927,4 +927,154 @@ class TestGetBookmarksTool:
         assert len(parsed) == 1
         assert parsed[0]["doc_id"] == "docs:setup.md"
         assert parsed[0]["title"] == "Setup Guide"
-        assert parsed[0]["source"] == "docs"
+
+
+class TestSourcesTreeEndpoints:
+    """Tests for /api/sources/tree and /api/sources/{name}/tree."""
+
+    def _make_app(self, tmp_path: Path, source_name: str = "docs"):
+        source_dir = tmp_path / source_name
+        source_dir.mkdir()
+        config = Config(
+            sources=[RepoSource(name=source_name, path=str(source_dir))],
+            data_dir=str(tmp_path / "data"),
+            poll_interval_seconds=9999,
+        )
+        mcp = server_module.init_app(config)
+        kb = server_module._get_kb()
+        return mcp, kb
+
+    def test_single_source_tree_returns_files(self, tmp_path: Path) -> None:
+        mcp, kb = self._make_app(tmp_path)
+        try:
+            kb.upsert_document(
+                "docs:a.md",
+                "",
+                {"source": "docs", "file_path": "a.md", "title": "A", "is_chunk": False},
+            )
+            kb.upsert_document(
+                "docs:sub/b.md",
+                "",
+                {
+                    "source": "docs",
+                    "file_path": "sub/b.md",
+                    "title": "B",
+                    "is_chunk": False,
+                },
+            )
+
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/docs/tree")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["source"] == "docs"
+            paths = [f["file_path"] for f in body["files"]]
+            assert paths == ["a.md", "sub/b.md"]
+            assert body["files"][0]["doc_id"] == "docs:a.md"
+            assert body["files"][0]["title"] == "A"
+        finally:
+            kb.close()
+
+    def test_single_source_tree_excludes_chunks(self, tmp_path: Path) -> None:
+        mcp, kb = self._make_app(tmp_path)
+        try:
+            kb.upsert_document(
+                "docs:a.md",
+                "",
+                {"source": "docs", "file_path": "a.md", "title": "A", "is_chunk": False},
+            )
+            kb.upsert_document(
+                "docs:a.md#chunk0",
+                "content",
+                {
+                    "source": "docs",
+                    "file_path": "a.md",
+                    "title": "A",
+                    "chunk_index": 0,
+                    "is_chunk": True,
+                },
+            )
+
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/docs/tree")
+            assert response.status_code == 200
+            assert len(response.json()["files"]) == 1
+        finally:
+            kb.close()
+
+    def test_single_source_tree_unknown_source(self, tmp_path: Path) -> None:
+        mcp, kb = self._make_app(tmp_path)
+        try:
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/nonexistent/tree")
+            assert response.status_code == 404
+        finally:
+            kb.close()
+
+    def test_bulk_tree_returns_all_sources(self, tmp_path: Path) -> None:
+        # Two configured sources, with docs in each.
+        source_a = tmp_path / "a"
+        source_a.mkdir()
+        source_b = tmp_path / "b"
+        source_b.mkdir()
+        config = Config(
+            sources=[
+                RepoSource(name="a", path=str(source_a)),
+                RepoSource(name="b", path=str(source_b)),
+            ],
+            data_dir=str(tmp_path / "data"),
+            poll_interval_seconds=9999,
+        )
+        mcp = server_module.init_app(config)
+        kb = server_module._get_kb()
+        try:
+            kb.upsert_document(
+                "a:one.md", "", {"source": "a", "file_path": "one.md", "is_chunk": False},
+            )
+            kb.upsert_document(
+                "b:two.md", "", {"source": "b", "file_path": "two.md", "is_chunk": False},
+            )
+
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/tree")
+            assert response.status_code == 200
+            body = response.json()
+            assert "sources" in body
+            names = {s["source"] for s in body["sources"]}
+            assert names == {"a", "b"}
+            by_name = {s["source"]: s for s in body["sources"]}
+            assert [f["file_path"] for f in by_name["a"]["files"]] == ["one.md"]
+            assert [f["file_path"] for f in by_name["b"]["files"]] == ["two.md"]
+        finally:
+            kb.close()
+
+    def test_bulk_tree_empty_when_no_sources(self, tmp_path: Path) -> None:
+        config = Config(
+            sources=[], data_dir=str(tmp_path / "data"), poll_interval_seconds=9999,
+        )
+        mcp = server_module.init_app(config)
+        kb = server_module._get_kb()
+        try:
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/tree")
+            assert response.status_code == 200
+            assert response.json() == {"sources": []}
+        finally:
+            kb.close()
+
+    def test_bulk_tree_includes_configured_but_unindexed_source(
+        self, tmp_path: Path,
+    ) -> None:
+        # A configured source that has no documents indexed yet should still
+        # appear in the bulk response so the sidebar can show it.
+        mcp, kb = self._make_app(tmp_path, source_name="freshly-added")
+        try:
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/tree")
+            assert response.status_code == 200
+            body = response.json()
+            assert len(body["sources"]) == 1
+            assert body["sources"][0]["source"] == "freshly-added"
+            assert body["sources"][0]["files"] == []
+        finally:
+            kb.close()

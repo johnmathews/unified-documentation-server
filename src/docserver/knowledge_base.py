@@ -1057,6 +1057,25 @@ class KnowledgeBase:
             for row in rows
         ]
 
+    def get_source_files(self, source: str) -> list[dict[str, _Scalar]]:
+        """Return parent-doc rows for *source*, ordered by file_path.
+
+        Powers the webapp's folder-tree view: callers build the nested
+        structure client-side by splitting ``file_path`` on ``/``. Chunks
+        are excluded — only one row per source file is returned.
+        """
+        rows = self._fetchall(
+            """
+            SELECT doc_id, file_path, title, modified_at
+            FROM documents
+            WHERE source = ?
+              AND (is_chunk = FALSE OR chunk_index IS NULL)
+            ORDER BY file_path
+            """,
+            (source,),
+        )
+        return _rows_to_dicts(rows)
+
     # ------------------------------------------------------------------
     # Source status tracking
     # ------------------------------------------------------------------

@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, TypedDict
 from apscheduler.schedulers.background import BackgroundScheduler
 from git import InvalidGitRepositoryError, Repo
 
+from docserver.config import DocTypesConfig, classify_doc_type
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -139,6 +141,10 @@ class DocumentMetadata(TypedDict, total=False):
     total_chunks: int
     is_chunk: bool
     section_path: str
+    # Document type classification (Stage 2 W2.2/W2.3). Populated by the
+    # Ingester via :func:`docserver.config.classify_doc_type` after parsing.
+    # Defaults to ``'documentation'`` when no doc_types.yaml is configured.
+    type: str
 
 
 class ParsedDocument(TypedDict):
@@ -1016,13 +1022,22 @@ def _chunk_content(
 class Ingester:
     """Orchestrates ingestion across all configured sources."""
 
-    def __init__(self, config: Config, kb: KnowledgeBase) -> None:
+    def __init__(
+        self,
+        config: Config,
+        kb: KnowledgeBase,
+        doc_types_config: DocTypesConfig | None = None,
+    ) -> None:
         self.config = config
         self.kb = kb
         self._parser = DocumentParser()
         self._scheduler = BackgroundScheduler()
         self._managers: dict[str, RepoManager] = {}
         self._last_check_times: dict[str, str] = {}
+        # Empty DocTypesConfig() is fine when callers don't pass one — every
+        # doc falls through to ``fallback_type`` ('documentation'), matching
+        # the SQLite column default.
+        self._doc_types_config = doc_types_config or DocTypesConfig()
         # Diagnostics from the most recent run_once call, surfaced via /health.
         # ru_maxrss is monotonically non-decreasing for the process lifetime,
         # so rss_at_end_mb is the lifetime peak observed when this cycle ended.
@@ -1582,6 +1597,14 @@ class Ingester:
                 base_doc_id: str = doc["doc_id"]
                 content: str = doc["content"]
                 base_metadata: DocumentMetadata = doc["metadata"]
+                # Classifier sits outside DocumentParser so the parser stays
+                # single-responsibility (raw → ParsedDocument); type assignment
+                # is a config-driven decision the Ingester owns.
+                base_metadata["type"] = classify_doc_type(
+                    str(base_metadata.get("file_path", "")),
+                    source.name,
+                    self._doc_types_config,
+                )
 
                 # Compute content hash for change detection.
                 # For binary files, hash the raw bytes; for text, hash the content string.

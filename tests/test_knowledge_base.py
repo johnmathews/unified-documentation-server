@@ -32,6 +32,235 @@ def test_upsert_and_get_document(kb):
     assert doc["source"] == "src"
 
 
+def test_default_type_is_documentation(kb):
+    """Stage 2 W2.1: documents land with type='documentation' when none supplied."""
+    kb.upsert_document(
+        "src:readme.md",
+        "",
+        {"source": "src", "file_path": "readme.md", "title": "README", "is_chunk": False},
+    )
+
+    doc = kb.get_document("src:readme.md")
+    assert doc is not None
+    assert doc["type"] == "documentation"
+
+
+def test_get_source_files_includes_type(kb):
+    """Stage 2 W2.5: tree endpoint surfaces type so the webapp can render badges."""
+    kb.upsert_document(
+        "src:journal/today.md",
+        "",
+        {
+            "source": "src",
+            "file_path": "journal/today.md",
+            "title": "Journal",
+            "is_chunk": False,
+            "type": "journal",
+        },
+    )
+    rows = kb.get_source_files("src")
+    assert len(rows) == 1
+    assert rows[0]["type"] == "journal"
+
+
+def test_query_documents_exclude_types(kb):
+    """Stage 2 W2.4: query_documents filters out rows whose type is excluded."""
+    kb.upsert_document(
+        "src:journal/today.md",
+        "",
+        {
+            "source": "src",
+            "file_path": "journal/today.md",
+            "title": "Journal",
+            "is_chunk": False,
+            "type": "journal",
+        },
+    )
+    kb.upsert_document(
+        "src:README.md",
+        "",
+        {
+            "source": "src",
+            "file_path": "README.md",
+            "title": "README",
+            "is_chunk": False,
+            "type": "documentation",
+        },
+    )
+
+    docs = kb.query_documents(source="src", exclude_types=["journal"])
+    titles = {d["title"] for d in docs}
+    assert titles == {"README"}
+
+    # Sanity: with no exclude, both are returned.
+    all_docs = kb.query_documents(source="src")
+    assert {d["title"] for d in all_docs} == {"Journal", "README"}
+
+
+def test_search_exclude_types_bm25(kb):
+    """Stage 2 W2.4: BM25 JOIN to documents respects exclude_types."""
+    kb.upsert_document(
+        "src:journal/note.md#chunk0",
+        "Strava activity sync notes for today's ride",
+        {
+            "source": "src",
+            "file_path": "journal/note.md",
+            "title": "Journal",
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "is_chunk": True,
+            "type": "journal",
+        },
+    )
+    kb.upsert_document(
+        "src:docs/strava.md#chunk0",
+        "Strava integration documentation and setup",
+        {
+            "source": "src",
+            "file_path": "docs/strava.md",
+            "title": "Strava Docs",
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "is_chunk": True,
+            "type": "documentation",
+        },
+    )
+
+    # Excluding 'journal' should leave only the docs chunk.
+    results = kb._bm25_search_chunks("strava", exclude_types=["journal"])
+    doc_ids = [r["doc_id"] for r in results]
+    assert "src:docs/strava.md#chunk0" in doc_ids
+    assert "src:journal/note.md#chunk0" not in doc_ids
+
+    # Without the filter both should appear.
+    all_results = kb._bm25_search_chunks("strava")
+    all_ids = {r["doc_id"] for r in all_results}
+    assert all_ids == {"src:docs/strava.md#chunk0", "src:journal/note.md#chunk0"}
+
+
+def test_search_exclude_types_dense(kb):
+    """Stage 2 W2.4: Chroma where uses $nin on type."""
+    kb.upsert_document(
+        "src:notes.md#chunk0",
+        "Quick reminder about laundry pickup",
+        {
+            "source": "src",
+            "file_path": "notes.md",
+            "title": "Notes",
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "is_chunk": True,
+            "type": "not-docs",
+        },
+    )
+    kb.upsert_document(
+        "src:guide.md#chunk0",
+        "Quick reference guide for laundry equipment",
+        {
+            "source": "src",
+            "file_path": "guide.md",
+            "title": "Guide",
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "is_chunk": True,
+            "type": "documentation",
+        },
+    )
+
+    results = kb._dense_search("laundry", exclude_types=["not-docs"])
+    doc_ids = {r["doc_id"] for r in results}
+    assert "src:notes.md#chunk0" not in doc_ids
+    assert "src:guide.md#chunk0" in doc_ids
+
+
+def test_backfill_types_runs_when_hash_changes(kb, tmp_path):
+    """Stage 2 W2.3: conditional backfill reclassifies on config change, not on restart.
+
+    Sequence:
+      1. Seed a few docs (default type 'documentation').
+      2. Write a doc_types.yaml that promotes journal/* to 'journal'.
+      3. First backfill reclassifies; second backfill no-ops; edited config
+         triggers another reclassification.
+    """
+    from docserver.config import load_doc_types_config
+
+    kb.upsert_document(
+        "src:journal/2026-05-13.md",
+        "",
+        {
+            "source": "src",
+            "file_path": "journal/2026-05-13.md",
+            "title": "Today",
+            "is_chunk": False,
+        },
+    )
+    kb.upsert_document(
+        "src:README.md",
+        "",
+        {"source": "src", "file_path": "README.md", "title": "README", "is_chunk": False},
+    )
+
+    config_path = tmp_path / "doc_types.yaml"
+    config_path.write_text(
+        """
+types: [documentation, journal]
+fallback_type: documentation
+global_rules:
+  - pattern: "**/journal/**"
+    type: journal
+"""
+    )
+    cfg = load_doc_types_config(str(config_path))
+
+    # First run: stored hash absent, so backfill fires and reclassifies the journal doc.
+    updated = kb.backfill_types_if_needed(cfg, str(config_path))
+    assert updated == 1
+    journal_doc = kb.get_document("src:journal/2026-05-13.md")
+    readme_doc = kb.get_document("src:README.md")
+    assert journal_doc is not None
+    assert readme_doc is not None
+    assert journal_doc["type"] == "journal"
+    assert readme_doc["type"] == "documentation"
+
+    # Second run with the same config: hash matches, no work.
+    updated_again = kb.backfill_types_if_needed(cfg, str(config_path))
+    assert updated_again == 0
+
+    # Edit the config so the readme is also classified as 'journal' — new hash,
+    # backfill must run again.
+    config_path.write_text(
+        """
+types: [documentation, journal]
+fallback_type: journal
+global_rules:
+  - pattern: "**/journal/**"
+    type: journal
+"""
+    )
+    cfg2 = load_doc_types_config(str(config_path))
+    updated_after_edit = kb.backfill_types_if_needed(cfg2, str(config_path))
+    assert updated_after_edit == 1
+    readme_doc_after = kb.get_document("src:README.md")
+    assert readme_doc_after is not None
+    assert readme_doc_after["type"] == "journal"
+
+
+def test_meta_table_exists(kb):
+    """Stage 2 W2.1: meta key/value table is available for W2.3's hash bookkeeping."""
+    import sqlite3
+
+    with sqlite3.connect(kb._db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("doc_types_hash", "abc123"),
+        )
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", ("doc_types_hash",)
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "abc123"
+
+
 def test_upsert_chunk_and_search(kb):
     kb.upsert_document(
         "src:readme.md#chunk0",

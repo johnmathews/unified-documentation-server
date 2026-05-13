@@ -1,0 +1,54 @@
+# Document-type classifier rules.
+#
+# Each parent document is assigned exactly one type. The classifier walks the
+# rule list per-source first, then global, then falls back to ``fallback_type``.
+# First match wins (mirrors .gitignore semantics — exceptions before catch-alls).
+#
+# Bind-mounted alongside sources.yaml at /config/ in production. Editing this
+# file and restarting the docserver triggers a one-shot reclassification of
+# every existing parent document (W2.3 conditional backfill, gated on a
+# SHA256 of this file's content stored in the ``meta`` table).
+#
+# Path matching uses ``fnmatch.fnmatch`` against the doc's repo-relative
+# ``file_path``. Supported wildcards: ``*`` (no slashes), ``?``, ``[abc]``,
+# and ``**`` (any depth, including slashes). Patterns are case-sensitive.
+#
+# Resolution: ``DOCSERVER_DOC_TYPES_CONFIG`` env var → /config/doc_types.yaml
+# default. Missing file → all docs classified as ``fallback_type``.
+
+# Vocabulary. The classifier rejects rules and ``fallback_type`` values that
+# reference any type not listed here. Stage 2 ships four types; the
+# vocabulary block exists so future extension is a schema edit, not a code
+# edit.
+types:
+  - documentation
+  - journal
+  - prompt
+  - not-docs
+
+fallback_type: documentation
+
+# Global rules apply to every source unless overridden by a per-source rule
+# that matches first. Order matters within the list.
+global_rules:
+  - pattern: "**/journal/**"
+    type: journal
+  - pattern: "journal/**"
+    type: journal
+  - pattern: "**/prompts/**"
+    type: prompt
+  - pattern: "prompts/**"
+    type: prompt
+  - pattern: "**/.DS_Store"
+    type: not-docs
+  - pattern: "**/*.lock"
+    type: not-docs
+
+# Per-source overrides. Source names must match ``sources.yaml`` entries.
+# Unknown source names log a warning at load time and are otherwise ignored.
+source_rules: {}
+  # example_source:
+  #   - pattern: "notebooks/**"
+  #     type: not-docs
+  #   - pattern: "**/*.md"
+  #     type: documentation

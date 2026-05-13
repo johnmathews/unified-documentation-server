@@ -356,7 +356,14 @@ class TestExecuteChatTool:
     class MockKB:
         """Minimal mock for KnowledgeBase methods used by _execute_chat_tool."""
 
-        def search(self, *, query: str, n_results: int, source_filter: str | None = None):
+        def search(
+            self,
+            *,
+            query: str,
+            n_results: int,
+            source_filter: str | None = None,
+            exclude_types: list[str] | None = None,
+        ):
             if query == "empty":
                 return []
             return [
@@ -415,7 +422,14 @@ class TestExecuteChatTool:
         """Search results with long content should be truncated."""
 
         class LongContentKB(self.MockKB):
-            def search(self, *, query: str, n_results: int, source_filter: str | None = None):
+            def search(
+                self,
+                *,
+                query: str,
+                n_results: int,
+                source_filter: str | None = None,
+                exclude_types: list[str] | None = None,
+            ):
                 return [
                     {
                         "content": "x" * 500,

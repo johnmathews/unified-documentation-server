@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
 import anthropic
@@ -24,7 +24,7 @@ from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 from starlette.responses import FileResponse, JSONResponse
 
 from docserver.bookmarks import BookmarkStore
-from docserver.config import Config, load_config
+from docserver.config import Config, load_config, load_doc_types_config
 from docserver.conversations import ConversationStore
 
 if TYPE_CHECKING:
@@ -140,6 +140,15 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                     "description": "Max results (default 3, max 10).",
                 },
                 "source": {"type": "string", "description": "Source name filter."},
+                "exclude_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Document types to exclude. Common values: "
+                        "'not-docs', 'journal', 'prompt'. The host UI may also "
+                        "apply an exclusion that's merged with this list."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -156,6 +165,11 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                 "created_after": {"type": "string", "description": "ISO date."},
                 "created_before": {"type": "string", "description": "ISO date."},
                 "limit": {"type": "integer", "description": "Max results (default 20)."},
+                "exclude_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Document types to exclude (see search_docs).",
+                },
             },
         },
     },
@@ -293,13 +307,53 @@ def _compact_old_tool_results(messages: list[MessageParam]) -> None:
                     item["content"] = f"[Prior result: {len(orig)} chars]"
 
 
-def _execute_chat_tool(kb: KnowledgeBase, tool_name: str, tool_input: dict[str, Any]) -> str:  # pyright: ignore[reportExplicitAny]
-    """Execute a chat tool call and return the result as a string."""
+def _merge_exclude_types(
+    model_supplied: object, request_excludes: list[str] | None,
+) -> list[str] | None:
+    """Union the model's exclude_types (if any) with the request-level policy.
+
+    The model can pass either a list (preferred, per the tool schema) or a
+    comma-separated string. We accept both and dedupe against the
+    ``request_excludes`` set so a UI-enforced exclusion is always honoured
+    regardless of what the model passes. Returns ``None`` when the union is
+    empty so downstream callers can short-circuit cleanly.
+    """
+    model_list: list[str] = []
+    if isinstance(model_supplied, list):
+        model_list = [str(x) for x in cast("list[Any]", model_supplied) if x]
+    elif isinstance(model_supplied, str) and model_supplied.strip():
+        model_list = [t.strip() for t in model_supplied.split(",") if t.strip()]
+
+    merged = list({*model_list, *(request_excludes or [])})
+    return merged or None
+
+
+def _execute_chat_tool(  # noqa: C901
+    kb: KnowledgeBase,
+    tool_name: str,
+    tool_input: dict[str, Any],  # pyright: ignore[reportExplicitAny]
+    request_exclude_types: list[str] | None = None,
+) -> str:
+    """Execute a chat tool call and return the result as a string.
+
+    *request_exclude_types* is the policy supplied in the HTTP request body
+    (see W2.4 and W3.6 — UI-driven exclusion). It is unioned with any
+    exclude_types the model chooses to pass so a UI-enforced policy always
+    wins.
+    """
     if tool_name == "search_docs":
         query = str(tool_input.get("query", ""))
         num_results = _safe_int(tool_input.get("num_results"), default=3, lo=1, hi=10)
         source_filter = str(tool_input.get("source", "")) or None
-        results = kb.search(query=query, n_results=num_results, source_filter=source_filter)
+        exclude_types = _merge_exclude_types(
+            tool_input.get("exclude_types"), request_exclude_types
+        )
+        results = kb.search(
+            query=query,
+            n_results=num_results,
+            source_filter=source_filter,
+            exclude_types=exclude_types,
+        )
         if not results:
             return "No matching documents found."
         parts: list[str] = []
@@ -323,6 +377,9 @@ def _execute_chat_tool(kb: KnowledgeBase, tool_name: str, tool_input: dict[str, 
             created_after=str(tool_input.get("created_after", "")) or None,
             created_before=str(tool_input.get("created_before", "")) or None,
             limit=_safe_int(tool_input.get("limit"), default=20, lo=1, hi=20),
+            exclude_types=_merge_exclude_types(
+                tool_input.get("exclude_types"), request_exclude_types,
+            ),
         )
         if not docs:
             return "No matching documents found."
@@ -513,6 +570,10 @@ class _ChatRequest:
     user_message: str
     model: str
     client: anthropic.Anthropic
+    # Stage 2 W2.4: caller-provided document-type exclusion list. Applied to
+    # every search_docs / query_docs tool invocation regardless of what the
+    # model passes — the UI toggle controls policy, not the model.
+    exclude_types: list[str]
 
 
 async def _prepare_chat_request(request: Request) -> _ChatRequest | JSONResponse:
@@ -530,6 +591,12 @@ async def _prepare_chat_request(request: Request) -> _ChatRequest | JSONResponse
     page_context: dict[str, str] | None = body.get("page_context")  # pyright: ignore[reportAny]
     history: list[dict[str, str]] = body.get("history", [])  # pyright: ignore[reportAny]
     conversation_id: str | None = body.get("conversation_id")  # pyright: ignore[reportAny]
+    raw_excludes: object = body.get("exclude_types", [])  # pyright: ignore[reportAny]
+    exclude_types: list[str] = (
+        [str(x) for x in cast("list[Any]", raw_excludes) if x]
+        if isinstance(raw_excludes, list)
+        else []
+    )
 
     # Build system prompt as content blocks for caching
     current_date = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -585,6 +652,7 @@ async def _prepare_chat_request(request: Request) -> _ChatRequest | JSONResponse
         user_message=message,
         model=model,
         client=client,
+        exclude_types=exclude_types,
     )
 
 
@@ -1033,7 +1101,12 @@ def create_mcp(config: Config) -> FastMCP:
                     if isinstance(block, ToolUseBlock):
                         tool_input = block.input if isinstance(block.input, dict) else {}
                         tool_t0 = time.monotonic()
-                        result_text = _execute_chat_tool(kb, block.name, tool_input)
+                        result_text = _execute_chat_tool(
+                            kb,
+                            block.name,
+                            tool_input,
+                            request_exclude_types=req.exclude_types,
+                        )
                         tool_duration_ms = int((time.monotonic() - tool_t0) * 1000)
                         tool_call_count += 1
                         logger.info(
@@ -1200,7 +1273,11 @@ def create_mcp(config: Config) -> FastMCP:
 
                             tool_t0 = time.monotonic()
                             result_text = await asyncio.to_thread(
-                                _execute_chat_tool, kb, block.name, tool_input,
+                                _execute_chat_tool,
+                                kb,
+                                block.name,
+                                tool_input,
+                                req.exclude_types,
                             )
                             tool_duration_ms = int((time.monotonic() - tool_t0) * 1000)
                             logger.info(
@@ -1446,7 +1523,12 @@ def create_mcp(config: Config) -> FastMCP:
     # ---- Tools ----------------------------------------------------------
 
     @server.tool()
-    def search_docs(query: str, num_results: int = 10, source: str = "") -> str:  # pyright: ignore[reportUnusedFunction]
+    def search_docs(  # pyright: ignore[reportUnusedFunction]
+        query: str,
+        num_results: int = 10,
+        source: str = "",
+        exclude_types: str = "",
+    ) -> str:
         """Semantic search across all indexed documentation from John's home
         server infrastructure and software projects.
 
@@ -1462,14 +1544,19 @@ def create_mcp(config: Config) -> FastMCP:
             num_results: Maximum number of results to return (default 10).
             source: Optional source name to filter results to a specific
                 repository. Use list_sources to see available source names.
+            exclude_types: Comma-separated document types to exclude (e.g.
+                "not-docs" or "journal,not-docs"). Known types:
+                documentation, journal, prompt, not-docs.
         """
         kb = _get_kb()
         num_results = max(1, min(num_results, 100))
+        exclude_list = [t.strip() for t in exclude_types.split(",") if t.strip()] or None
         t0 = time.monotonic()
         results = kb.search(
             query=query,
             n_results=num_results,
             source_filter=source or None,
+            exclude_types=exclude_list,
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
@@ -1504,6 +1591,7 @@ def create_mcp(config: Config) -> FastMCP:
         created_after: str = "",
         created_before: str = "",
         limit: int = 20,
+        exclude_types: str = "",
     ) -> str:
         """Structured query for document metadata across indexed sources.
 
@@ -1517,9 +1605,13 @@ def create_mcp(config: Config) -> FastMCP:
             created_after: ISO date string, e.g. "2024-01-01".
             created_before: ISO date string.
             limit: Max results (default 20).
+            exclude_types: Comma-separated document types to exclude (e.g.
+                "not-docs"). Known types: documentation, journal, prompt,
+                not-docs.
         """
         kb = _get_kb()
         limit = max(1, min(limit, 100))
+        exclude_list = [t.strip() for t in exclude_types.split(",") if t.strip()] or None
         docs = kb.query_documents(
             source=source or None,
             file_path_contains=file_path_contains or None,
@@ -1527,6 +1619,7 @@ def create_mcp(config: Config) -> FastMCP:
             created_after=created_after or None,
             created_before=created_before or None,
             limit=limit,
+            exclude_types=exclude_list,
         )
 
         if not docs:
@@ -1674,7 +1767,21 @@ def init_app(config: Config | None = None) -> FastMCP:
         chroma_host=config.chroma_host,
         chroma_port=config.chroma_port,
     )
-    _ingester = Ingester(config, _kb)
+
+    # Stage 2: load doc-type classifier config and reclassify on startup only
+    # when the config's content hash differs from the previous run. The KB
+    # owns the hash bookkeeping in its ``meta`` table; missing config → all
+    # docs fall through to the default 'documentation' type.
+    doc_types_path = os.environ.get(
+        "DOCSERVER_DOC_TYPES_CONFIG", "/config/doc_types.yaml"
+    )
+    known_source_names = {s.name for s in config.sources}
+    doc_types_config = load_doc_types_config(
+        doc_types_path, known_source_names=known_source_names
+    )
+    _kb.backfill_types_if_needed(doc_types_config, doc_types_path)
+
+    _ingester = Ingester(config, _kb, doc_types_config=doc_types_config)
     _supervisor = IngesterSupervisor(
         config,
         on_cycle_success=_invalidate_inventory_cache,

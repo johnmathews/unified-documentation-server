@@ -115,7 +115,14 @@ size_bytes    INTEGER
 is_chunk      BOOLEAN
 section_path  TEXT           -- heading hierarchy, e.g. "Setup > Ports"
 content_hash  TEXT           -- SHA-256 of file content for change detection
+type          TEXT           -- one of documentation/journal/prompt/not-docs
 ```
+
+A secondary `meta (key, value)` table records the SHA256 of `doc_types.yaml`
+the last time classifications were reapplied. On startup the docserver
+compares the current file hash against this stored value; identical hashes
+short-circuit (O(1) check), differing hashes trigger a backfill that
+reclassifies every parent doc and syncs ChromaDB metadata.
 
 Supports structured queries like:
 - "When was documentation about X created?"
@@ -123,6 +130,18 @@ Supports structured queries like:
 - "What was indexed after date Z?"
 
 Parent docs (non-chunks) are returned by `query_documents()` so results represent whole files, not fragments.
+
+#### Document types
+
+Each parent document and chunk carries a `type` in the `documents` table.
+Stage 2 ships four types — `documentation`, `journal`, `prompt`, `not-docs` —
+defined in `config/doc_types.yaml` (resolved from `DOCSERVER_DOC_TYPES_CONFIG`,
+defaults to `/config/doc_types.yaml`). Classifier rules are first-match-wins,
+per-source before global, then `fallback_type`. Search, query, and chat
+endpoints accept an `exclude_types` parameter that filters BM25 (via a
+`JOIN documents` clause) and the dense leg (via Chroma's `$nin` operator).
+Chunk metadata in ChromaDB also carries `type` so the two legs filter
+consistently.
 
 ### ChromaDB (sidecar service)
 

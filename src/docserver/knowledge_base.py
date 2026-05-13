@@ -15,6 +15,7 @@ FTS5 with a title-weighted BM25 query subsumes it without the score-scale hack.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, ClassVar, TypedDict, cast
 
 import chromadb
 
+from docserver.config import DocTypesConfig, classify_doc_type
 from docserver.embedding import OnnxEmbeddingFunction
 from docserver.reranker import rerank as _rerank
 
@@ -73,12 +75,14 @@ CREATE TABLE IF NOT EXISTS documents (
     size_bytes    INTEGER,
     is_chunk      BOOLEAN DEFAULT FALSE,
     section_path  TEXT DEFAULT '',
-    content_hash  TEXT DEFAULT ''
+    content_hash  TEXT DEFAULT '',
+    type          TEXT DEFAULT 'documentation'
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents (source);
 CREATE INDEX IF NOT EXISTS idx_documents_file_path ON documents (file_path);
 CREATE INDEX IF NOT EXISTS idx_documents_is_chunk ON documents (is_chunk);
+CREATE INDEX IF NOT EXISTS idx_documents_type ON documents (type);
 
 CREATE TABLE IF NOT EXISTS source_status (
     source               TEXT PRIMARY KEY,
@@ -86,6 +90,15 @@ CREATE TABLE IF NOT EXISTS source_status (
     last_error           TEXT,
     last_error_at        TEXT,
     consecutive_failures INTEGER DEFAULT 0
+);
+
+-- Single-row-per-key key/value store. Currently used by W2.3's conditional
+-- backfill to remember the SHA256 of doc_types.yaml the last time
+-- classifications were reapplied, so restarts without config changes are an
+-- O(1) no-op.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 -- Full-text BM25 index over chunk content. ``title`` is included so that
@@ -104,6 +117,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 
 _MIGRATIONS = [
     "ALTER TABLE documents ADD COLUMN content_hash TEXT DEFAULT ''",
+    "ALTER TABLE documents ADD COLUMN type TEXT DEFAULT 'documentation'",
 ]
 
 _CHROMA_COLLECTION = "documents"
@@ -329,11 +343,11 @@ class KnowledgeBase:
                 INSERT OR REPLACE INTO documents
                     (doc_id, source, file_path, title, content, chunk_index,
                      total_chunks, created_at, modified_at, indexed_at, size_bytes, is_chunk,
-                     section_path, content_hash)
+                     section_path, content_hash, type)
                 VALUES
                     (:doc_id, :source, :file_path, :title, :content, :chunk_index,
                      :total_chunks, :created_at, :modified_at, :indexed_at, :size_bytes, :is_chunk,
-                     :section_path, :content_hash)
+                     :section_path, :content_hash, :type)
                 """,
                 {
                     "doc_id": doc_id,
@@ -350,6 +364,7 @@ class KnowledgeBase:
                     "is_chunk": is_chunk,
                     "section_path": metadata.get("section_path", ""),
                     "content_hash": metadata.get("content_hash", ""),
+                    "type": metadata.get("type", "documentation"),
                 },
             )
 
@@ -377,6 +392,7 @@ class KnowledgeBase:
                 "total_chunks": int(metadata.get("total_chunks", 1) or 1),
                 "is_chunk": True,
                 "section_path": str(metadata.get("section_path", "")),
+                "type": str(metadata.get("type", "documentation")),
             }
             self._collection.upsert(
                 ids=[doc_id],
@@ -422,6 +438,7 @@ class KnowledgeBase:
                     "is_chunk": bool(metadata.get("is_chunk", False)),
                     "section_path": metadata.get("section_path", ""),
                     "content_hash": metadata.get("content_hash", ""),
+                    "type": metadata.get("type", "documentation"),
                 }
             )
 
@@ -444,11 +461,11 @@ class KnowledgeBase:
                 INSERT OR REPLACE INTO documents
                     (doc_id, source, file_path, title, content, chunk_index,
                      total_chunks, created_at, modified_at, indexed_at, size_bytes, is_chunk,
-                     section_path, content_hash)
+                     section_path, content_hash, type)
                 VALUES
                     (:doc_id, :source, :file_path, :title, :content, :chunk_index,
                      :total_chunks, :created_at, :modified_at, :indexed_at, :size_bytes, :is_chunk,
-                     :section_path, :content_hash)
+                     :section_path, :content_hash, :type)
                 """,
                 rows,
             )
@@ -482,6 +499,7 @@ class KnowledgeBase:
                     "total_chunks": int(metadata.get("total_chunks", 1) or 1),
                     "is_chunk": True,
                     "section_path": str(metadata.get("section_path", "")),
+                    "type": str(metadata.get("type", "documentation")),
                 }
             )
 
@@ -531,15 +549,26 @@ class KnowledgeBase:
         query: str,
         n_results: int = 10,
         source_filter: str | None = None,
+        exclude_types: list[str] | None = None,
     ) -> list[SearchResult]:
         """Dense leg of L1: ChromaDB cosine over chunk embeddings.
 
         Returns chunk-level results ordered by cosine distance ascending
         (lower = more similar). The score field holds the raw distance.
         """
-        where: Where | None = None
+        clauses: list[Where] = []
         if source_filter:
-            where = {"source": source_filter}
+            clauses.append({"source": source_filter})
+        if exclude_types:
+            clauses.append({"type": {"$nin": list(exclude_types)}})
+
+        where: Where | None
+        if not clauses:
+            where = None
+        elif len(clauses) == 1:
+            where = clauses[0]
+        else:
+            where = {"$and": clauses}
 
         try:
             results = self._collection.query(
@@ -578,27 +607,44 @@ class KnowledgeBase:
         query: str,
         n_results: int = _RRF_CANDIDATE_K,
         source_filter: str | None = None,
+        exclude_types: list[str] | None = None,
     ) -> list[SearchResult]:
         """Lexical leg of L1: SQLite FTS5 BM25 over chunk content + title.
 
         Returns chunk-level results ordered by BM25 ascending (FTS5's
         ``bm25()`` returns negative floats; lower = better match). The score
         field holds the raw BM25 value.
+
+        ``exclude_types`` filters chunks whose parent doc's ``type`` is in the
+        list. FTS5 supports joining the virtual table to a regular one as long
+        as the FTS table is the leftmost FROM table and the MATCH operator
+        binds to it — the ``bm25()`` auxiliary keeps its score ordering across
+        the JOIN.
         """
         match_expr = _sanitize_fts_query(query)
         if match_expr == '""':
             return []
 
+        # Always JOIN ``documents`` so result metadata can carry ``type``
+        # (W2.5). The JOIN cost on the small documents table is negligible
+        # compared to the FTS scan, and a single SQL path is cheaper to
+        # maintain than branching on ``exclude_types``.
         sql = (
-            "SELECT doc_id, source, title, content, "
+            "SELECT chunks_fts.doc_id, chunks_fts.source, chunks_fts.title, "
+            "chunks_fts.content, documents.type, "
             "bm25(chunks_fts, ?, ?) AS score "
             "FROM chunks_fts "
+            "JOIN documents ON documents.doc_id = chunks_fts.doc_id "
             "WHERE chunks_fts MATCH ?"
         )
         params: list[object] = [_BM25_TITLE_WEIGHT, _BM25_CONTENT_WEIGHT, match_expr]
         if source_filter:
-            sql += " AND source = ?"
+            sql += " AND chunks_fts.source = ?"
             params.append(source_filter)
+        if exclude_types:
+            placeholders = ",".join("?" * len(exclude_types))
+            sql += f" AND documents.type NOT IN ({placeholders})"
+            params.extend(exclude_types)
         sql += " ORDER BY score LIMIT ?"
         params.append(n_results)
 
@@ -621,6 +667,7 @@ class KnowledgeBase:
                 metadata={
                     "source": str(row["source"] or ""),
                     "title": str(row["title"] or ""),
+                    "type": str(row["type"] or "documentation"),
                 },
                 score=float(row["score"]),
             )
@@ -653,6 +700,7 @@ class KnowledgeBase:
         query: str,
         n_results: int = 10,
         source_filter: str | None = None,
+        exclude_types: list[str] | None = None,
     ) -> list[SearchResult]:
         """Hybrid chunk-level search: BM25 + dense, fused with RRF, then L2 rerank.
 
@@ -660,12 +708,22 @@ class KnowledgeBase:
         results ordered by cross-encoder logit descending. The score field
         holds the rerank logit (higher = better). If the reranker is
         unavailable the L1-fused order is returned with RRF scores.
+
+        ``exclude_types`` removes chunks whose parent doc's ``type`` matches.
+        Applied uniformly to both L1 legs so the dense and BM25 candidate
+        sets are filtered consistently before fusion.
         """
         dense = self._dense_search(
-            query, n_results=_RRF_CANDIDATE_K, source_filter=source_filter,
+            query,
+            n_results=_RRF_CANDIDATE_K,
+            source_filter=source_filter,
+            exclude_types=exclude_types,
         )
         bm25 = self._bm25_search_chunks(
-            query, n_results=_RRF_CANDIDATE_K, source_filter=source_filter,
+            query,
+            n_results=_RRF_CANDIDATE_K,
+            source_filter=source_filter,
+            exclude_types=exclude_types,
         )
 
         # Build a lookup of doc_id → SearchResult. Prefer the dense entry for
@@ -700,6 +758,7 @@ class KnowledgeBase:
         created_after: str | None = None,
         created_before: str | None = None,
         limit: int = 20,
+        exclude_types: list[str] | None = None,
     ) -> list[dict[str, _Scalar]]:
         """Structured SQL query returning parent docs only (no chunks).
 
@@ -728,10 +787,15 @@ class KnowledgeBase:
             conditions.append("created_at <= ?")
             params.append(created_before)
 
+        if exclude_types:
+            placeholders = ",".join("?" * len(exclude_types))
+            conditions.append(f"type NOT IN ({placeholders})")
+            params.extend(exclude_types)
+
         where_clause = " AND ".join(conditions)
         sql = f"""
             SELECT doc_id, source, file_path, title, chunk_index, total_chunks,
-                   created_at, modified_at, indexed_at, size_bytes, is_chunk
+                   created_at, modified_at, indexed_at, size_bytes, is_chunk, type
             FROM documents
             WHERE {where_clause}
             ORDER BY indexed_at DESC
@@ -1062,11 +1126,13 @@ class KnowledgeBase:
 
         Powers the webapp's folder-tree view: callers build the nested
         structure client-side by splitting ``file_path`` on ``/``. Chunks
-        are excluded — only one row per source file is returned.
+        are excluded — only one row per source file is returned. The
+        ``type`` field (W2.5) lets the webapp render badges and apply the
+        type-filter inline without a second roundtrip.
         """
         rows = self._fetchall(
             """
-            SELECT doc_id, file_path, title, modified_at
+            SELECT doc_id, file_path, title, modified_at, type
             FROM documents
             WHERE source = ?
               AND (is_chunk = FALSE OR chunk_index IS NULL)
@@ -1075,6 +1141,146 @@ class KnowledgeBase:
             (source,),
         )
         return _rows_to_dicts(rows)
+
+    # ------------------------------------------------------------------
+    # Document-type backfill (Stage 2 W2.3)
+    # ------------------------------------------------------------------
+
+    _DOC_TYPES_HASH_KEY: ClassVar[str] = "doc_types_hash"
+
+    @staticmethod
+    def _hash_file(path: str | None) -> str:
+        """Return the SHA256 of the file at *path*, or empty string if missing.
+
+        Used as the cache key for conditional reclassification. The empty-hash
+        sentinel maps to "no doc_types config" — restart-without-config edits
+        do not re-trigger a backfill.
+        """
+        if not path or not os.path.exists(path):
+            return ""
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+
+    def _read_doc_types_hash(self) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (self._DOC_TYPES_HASH_KEY,)
+            ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def _write_doc_types_hash(self, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (self._DOC_TYPES_HASH_KEY, value),
+            )
+
+    def backfill_types_if_needed(
+        self, doc_types_config: DocTypesConfig, config_path: str | None,
+    ) -> int:
+        """Reclassify every doc when ``doc_types.yaml`` changes; otherwise no-op.
+
+        Compares a SHA256 of the config file content against the value stored
+        in the ``meta`` table. When they differ (including the first-run case
+        where the row is missing), every parent doc and chunk is reclassified
+        from its ``file_path`` and ``source``. Rows whose type is unchanged
+        skip the UPDATE so SQLite WAL churn stays proportional to actual
+        change. ChromaDB chunk metadata is kept in sync so the dense leg's
+        type filter sees the same values as the BM25 leg.
+
+        Returns the number of SQLite rows whose type changed. Always stores
+        the new hash, so subsequent calls with the same config short-circuit.
+        """
+        new_hash = self._hash_file(config_path)
+        stored_hash = self._read_doc_types_hash()
+        if stored_hash == new_hash:
+            logger.debug(
+                "doc_types hash unchanged (%s); skipping backfill",
+                new_hash or "<missing config>",
+                extra={"event": "doc_types_backfill_skip", "hash": new_hash},
+            )
+            return 0
+
+        logger.info(
+            "doc_types config changed (stored=%s, current=%s); reclassifying all docs",
+            stored_hash or "<unset>",
+            new_hash or "<missing config>",
+            extra={"event": "doc_types_backfill_start"},
+        )
+
+        rows = self._fetchall(
+            "SELECT doc_id, source, file_path, type FROM documents"
+        )
+        sqlite_updates: list[tuple[str, str]] = []
+        chroma_updates: dict[str, str] = {}
+        for row in rows:
+            doc_id = str(row["doc_id"])
+            new_type = classify_doc_type(
+                str(row["file_path"] or ""),
+                str(row["source"] or ""),
+                doc_types_config,
+            )
+            if new_type != str(row["type"] or ""):
+                sqlite_updates.append((new_type, doc_id))
+                # Chunks live in Chroma too — keep its metadata in sync so the
+                # dense leg's ``$nin`` filter and BM25's JOIN agree.
+                if "#chunk" in doc_id:
+                    chroma_updates[doc_id] = new_type
+
+        if sqlite_updates:
+            with self._connect() as conn:
+                conn.executemany(
+                    "UPDATE documents SET type = ? WHERE doc_id = ?",
+                    sqlite_updates,
+                )
+
+            if chroma_updates:
+                self._sync_chroma_types(chroma_updates)
+
+        self._write_doc_types_hash(new_hash)
+
+        logger.info(
+            "doc_types backfill complete: %d row(s) updated",
+            len(sqlite_updates),
+            extra={
+                "event": "doc_types_backfill_complete",
+                "updated": len(sqlite_updates),
+            },
+        )
+        return len(sqlite_updates)
+
+    def _sync_chroma_types(self, updates: dict[str, str]) -> None:
+        """Update Chroma metadata for chunks whose type changed.
+
+        Preserves all other metadata keys (source, file_path, title, etc.) by
+        reading the existing record first, then overwriting only ``type``.
+        ChromaDB silently no-ops for ids it doesn't recognise.
+        """
+        ids = list(updates.keys())
+        try:
+            existing = self._collection.get(ids=ids, include=["metadatas"])
+        except Exception:
+            logger.exception(
+                "ChromaDB get() failed during doc_types backfill; "
+                "SQLite types updated but Chroma metadata may drift.",
+                extra={"event": "doc_types_chroma_sync_failed"},
+            )
+            return
+
+        existing_ids = list(existing.get("ids") or [])
+        existing_metas = list(existing.get("metadatas") or [])
+        new_metas: list[dict[str, _Scalar]] = []
+        for doc_id, meta in zip(existing_ids, existing_metas, strict=False):
+            meta_dict = dict(meta) if meta else {}
+            meta_dict["type"] = updates[doc_id]
+            new_metas.append(cast("dict[str, _Scalar]", meta_dict))
+
+        if new_metas:
+            with contextlib.suppress(Exception):
+                self._collection.update(
+                    ids=existing_ids,
+                    metadatas=cast("list[Metadata]", new_metas),
+                )
 
     # ------------------------------------------------------------------
     # Source status tracking

@@ -82,7 +82,11 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents (source);
 CREATE INDEX IF NOT EXISTS idx_documents_file_path ON documents (file_path);
 CREATE INDEX IF NOT EXISTS idx_documents_is_chunk ON documents (is_chunk);
-CREATE INDEX IF NOT EXISTS idx_documents_type ON documents (type);
+-- idx_documents_type lives in _MIGRATIONS so it runs AFTER the ALTER TABLE
+-- that adds the column. Putting it here would fail on the first restart
+-- against an existing DB: the index references `type`, but the table created
+-- by CREATE TABLE IF NOT EXISTS on the legacy schema doesn't have that
+-- column yet — the migration that adds it hasn't run.
 
 CREATE TABLE IF NOT EXISTS source_status (
     source               TEXT PRIMARY KEY,
@@ -118,6 +122,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 _MIGRATIONS = [
     "ALTER TABLE documents ADD COLUMN content_hash TEXT DEFAULT ''",
     "ALTER TABLE documents ADD COLUMN type TEXT DEFAULT 'documentation'",
+    # Index on the new type column. Must run AFTER the ALTER above —
+    # see the _SCHEMA comment.
+    "CREATE INDEX IF NOT EXISTS idx_documents_type ON documents (type)",
 ]
 
 _CHROMA_COLLECTION = "documents"

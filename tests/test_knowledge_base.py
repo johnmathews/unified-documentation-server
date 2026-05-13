@@ -32,6 +32,59 @@ def test_upsert_and_get_document(kb):
     assert doc["source"] == "src"
 
 
+def test_upgrades_from_pre_stage2_schema(tmp_path):
+    """Regression: a legacy documents.db without a type column must upgrade cleanly.
+
+    Reproduces the production deploy bug where _SCHEMA's idx_documents_type
+    CREATE INDEX ran before _MIGRATIONS' ALTER TABLE ADD COLUMN type — the
+    index referenced a column that didn't exist yet, executescript aborted,
+    and the migration never got a chance to fire. The fix moves the index
+    creation into _MIGRATIONS so it lands after the ALTER.
+    """
+    import sqlite3
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db_path = data_dir / "documents.db"
+
+    # Seed a pre-Stage-2 schema by hand — same columns as before the type
+    # column landed. No type column, no idx_documents_type, no meta table.
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE documents (
+                doc_id        TEXT PRIMARY KEY,
+                source        TEXT NOT NULL,
+                file_path     TEXT NOT NULL,
+                title         TEXT,
+                content       TEXT,
+                chunk_index   INTEGER,
+                total_chunks  INTEGER,
+                created_at    TEXT,
+                modified_at   TEXT,
+                indexed_at    TEXT,
+                size_bytes    INTEGER,
+                is_chunk      BOOLEAN DEFAULT FALSE,
+                section_path  TEXT DEFAULT ''
+            );
+            INSERT INTO documents (doc_id, source, file_path, title, is_chunk)
+            VALUES ('src:legacy.md', 'src', 'legacy.md', 'Legacy', 0);
+            """
+        )
+
+    # Constructing a fresh KB against this DB must complete without raising
+    # — the migration runs first to add the column, then the index creation
+    # finds it.
+    _kb = KnowledgeBase(str(data_dir))
+    try:
+        doc = _kb.get_document("src:legacy.md")
+        assert doc is not None
+        # Existing row gets the column default.
+        assert doc["type"] == "documentation"
+    finally:
+        _kb.close()
+
+
 def test_default_type_is_documentation(kb):
     """Stage 2 W2.1: documents land with type='documentation' when none supplied."""
     kb.upsert_document(

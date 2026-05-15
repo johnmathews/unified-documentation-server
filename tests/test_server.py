@@ -900,6 +900,48 @@ class TestBookmarkEndpoints:
         assert bm["title"] == "Setup Guide"
         assert bm["source"] == "docs"
         assert bm["size_bytes"] == 1234
+        # The fixture seeds with no explicit type; upsert_document defaults
+        # to "documentation". Webapp groups by this field — see
+        # webapp/src/lib/api.ts:BookmarkEntry.type.
+        assert bm["type"] == "documentation"
+
+    def test_list_carries_non_default_type(self, app) -> None:
+        """Bookmarks list must surface non-default doc types so the webapp
+        can group / colour-code by type. Reproduces the round-2 webapp
+        regression where every bookmark showed up as "documentation"."""
+        kb = server_module._get_kb()
+        kb.upsert_document(
+            "docs:diary.md",
+            "",
+            {
+                "source": "docs",
+                "file_path": "diary.md",
+                "title": "Diary",
+                "type": "journal",
+                "is_chunk": False,
+            },
+        )
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+        client.post("/api/bookmarks", json={"doc_id": "docs:diary.md"})
+        bm = next(
+            b for b in client.get("/api/bookmarks").json()
+            if b["doc_id"] == "docs:diary.md"
+        )
+        assert bm["type"] == "journal"
+
+    def test_list_type_is_none_for_orphan_bookmark(self, app) -> None:
+        """A bookmark whose doc has been deleted from KB still lists, with
+        every enriched field (including type) reported as None."""
+        starlette_app = app.streamable_http_app()
+        client = TestClient(starlette_app)
+        client.post("/api/bookmarks", json={"doc_id": "docs:missing.md"})
+        bm = next(
+            b for b in client.get("/api/bookmarks").json()
+            if b["doc_id"] == "docs:missing.md"
+        )
+        assert bm["title"] is None
+        assert bm["type"] is None
 
     def test_bookmark_with_custom_user_id(self, app) -> None:
         starlette_app = app.streamable_http_app()

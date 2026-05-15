@@ -104,6 +104,74 @@ def test_main_passes_source_and_force_flags(small_config):
     assert callable(call_kwargs["progress_callback"])
 
 
+def test_main_classifies_doc_types(tmp_path, monkeypatch, capsys):
+    """The worker must load doc_types.yaml and classify ingested docs.
+
+    Reproduces the production bug where Docker-side ingestion ran in a
+    subprocess that never received the classifier config, so every doc
+    ended up with the fallback type ('documentation') in SQLite even
+    when ``doc_types.yaml`` would have classified it as ``journal``.
+    """
+    from docserver.knowledge_base import KnowledgeBase
+
+    # Real source repo with one markdown file in journal/ — the rule
+    # ``**/journal/**`` should classify it as 'journal'.
+    src = _make_source_dir(
+        tmp_path,
+        "repo-types",
+        {},
+    )
+    journal_dir = src / "journal"
+    journal_dir.mkdir()
+    (journal_dir / "260515-entry.md").write_text("# Entry\n\nContent.")
+
+    doc_types_path = tmp_path / "doc_types.yaml"
+    doc_types_path.write_text(
+        "types: [documentation, journal, prompt, not-docs]\n"
+        "fallback_type: documentation\n"
+        "global_rules:\n"
+        "  - {pattern: '**/journal/**', type: journal}\n"
+    )
+    monkeypatch.setenv("DOCSERVER_DOC_TYPES_CONFIG", str(doc_types_path))
+
+    config = Config(
+        sources=[RepoSource(name="repo-types", path=str(src))],
+        data_dir=str(tmp_path / "data"),
+    )
+    with patch.object(worker_module, "load_config", return_value=config):
+        rc = worker_module.main(argv=[])
+    assert rc == 0
+
+    # Open the resulting KB and confirm the doc landed with type=journal,
+    # not the fallback. SELECT * via get_document returns the type column.
+    kb = KnowledgeBase(config.data_dir)
+    try:
+        doc = kb.get_document("repo-types:journal/260515-entry.md")
+        assert doc is not None
+        assert doc["type"] == "journal", (
+            f"worker did not classify doc; got type={doc['type']!r}. "
+            "doc_types.yaml not being loaded in the worker process?"
+        )
+    finally:
+        kb.close()
+
+
+def test_main_returns_one_when_doc_types_config_invalid(small_config, tmp_path, monkeypatch):
+    """A malformed doc_types.yaml should fail loudly, not silently swallow
+    every doc into the fallback type."""
+    bad = tmp_path / "doc_types.yaml"
+    bad.write_text(
+        "types: [documentation]\n"
+        "fallback_type: documentation\n"
+        "global_rules:\n"
+        "  - {pattern: '*.md', type: unknown-type}\n"
+    )
+    monkeypatch.setenv("DOCSERVER_DOC_TYPES_CONFIG", str(bad))
+    with patch.object(worker_module, "load_config", return_value=small_config):
+        rc = worker_module.main(argv=[])
+    assert rc == 1
+
+
 def test_nice_env_var_applied(small_config, monkeypatch):
     """DOCSERVER_INGEST_NICE should be passed to os.nice."""
     monkeypatch.setenv("DOCSERVER_INGEST_NICE", "10")

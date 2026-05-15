@@ -1463,6 +1463,7 @@ def create_mcp(config: Config) -> FastMCP:
                     "created_at": doc.get("created_at") if doc else None,
                     "modified_at": doc.get("modified_at") if doc else None,
                     "size_bytes": doc.get("size_bytes") if doc else None,
+                    "type": doc.get("type") if doc else None,
                 })
             return _cors_json(enriched)
         except Exception:

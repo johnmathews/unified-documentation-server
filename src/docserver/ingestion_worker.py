@@ -40,7 +40,7 @@ import logging
 import os
 import sys
 
-from docserver.config import load_config
+from docserver.config import load_config, load_doc_types_config
 from docserver.ingestion import Ingester
 from docserver.knowledge_base import KnowledgeBase
 from docserver.logging_config import setup_logging
@@ -116,8 +116,22 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+    # Load the doc-type classifier from disk in the worker process. The
+    # server's init_app does the same thing for the in-process Ingester it
+    # builds, but the subprocess does not inherit Python state — it must
+    # re-load the config here or every doc ingested in Docker falls back to
+    # the default 'documentation' type.
     try:
-        ingester = Ingester(config, kb)
+        doc_types_config = load_doc_types_config(
+            known_source_names={s.name for s in config.sources}
+        )
+    except Exception:
+        logger.exception("Failed to load doc_types config in ingestion worker.")
+        kb.close()
+        return 1
+
+    try:
+        ingester = Ingester(config, kb, doc_types_config=doc_types_config)
         try:
             stats = ingester.run_once(
                 sources=args.source,

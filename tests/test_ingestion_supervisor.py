@@ -187,6 +187,73 @@ def test_concurrent_cycle_rejected(supervisor_factory):
 
 
 # ---------------------------------------------------------------------------
+# End-to-end: real ingestion_worker through Popen, classifier propagation
+# ---------------------------------------------------------------------------
+
+
+def test_real_worker_via_supervisor_classifies_doc_types(
+    tmp_path: Path, monkeypatch
+):
+    """Spawn the *real* ``docserver.ingestion_worker`` as a subprocess
+    through the supervisor and verify that doc-type classification crossed
+    the process boundary.
+
+    This is the production-shape reproduction of the
+    260513-doc-types-and-exclude.md follow-up: in Docker, ingestion runs
+    in a separate process from the docserver, and the classifier config
+    has to be re-loaded inside the subprocess (Python state doesn't
+    inherit). A test that calls ``Ingester`` directly cannot catch a
+    regression that breaks env-var propagation or the worker's load path.
+    """
+    from docserver.knowledge_base import KnowledgeBase
+
+    # Real markdown file under journal/ — rule below maps it to 'journal'.
+    repo = tmp_path / "repo-end-to-end"
+    repo.mkdir()
+    journal_dir = repo / "journal"
+    journal_dir.mkdir()
+    (journal_dir / "260515-entry.md").write_text("# Entry\n\nBody.")
+
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        f"sources:\n  - name: repo-end-to-end\n    path: {repo}\n"
+    )
+
+    doc_types_path = tmp_path / "doc_types.yaml"
+    doc_types_path.write_text(
+        "types: [documentation, journal, prompt, not-docs]\n"
+        "fallback_type: documentation\n"
+        "global_rules:\n"
+        "  - {pattern: '**/journal/**', type: journal}\n"
+    )
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("DOCSERVER_CONFIG", str(sources_path))
+    monkeypatch.setenv("DOCSERVER_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("DOCSERVER_DOC_TYPES_CONFIG", str(doc_types_path))
+    monkeypatch.delenv("DOCSERVER_CHROMA_HOST", raising=False)
+
+    sup = IngesterSupervisor(
+        Config(sources=[], data_dir=str(data_dir)),
+        worker_module="docserver.ingestion_worker",
+        timeout_seconds=180.0,
+    )
+    stats = sup.run_subprocess_cycle()
+    assert stats is not None, f"worker failed: {sup.last_failure!r}"
+    assert stats["repo-end-to-end"]["upserted"] >= 1
+
+    kb = KnowledgeBase(str(data_dir))
+    try:
+        doc = kb.get_document("repo-end-to-end:journal/260515-entry.md")
+        assert doc is not None
+        assert doc["type"] == "journal", (
+            f"subprocess did not classify doc; got type={doc['type']!r}"
+        )
+    finally:
+        kb.close()
+
+
+# ---------------------------------------------------------------------------
 # Argv construction
 # ---------------------------------------------------------------------------
 

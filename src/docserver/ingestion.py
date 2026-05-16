@@ -143,7 +143,7 @@ class DocumentMetadata(TypedDict, total=False):
     section_path: str
     # Document type classification (Stage 2 W2.2/W2.3). Populated by the
     # Ingester via :func:`docserver.config.classify_doc_type` after parsing.
-    # Defaults to ``'documentation'`` when no doc_types.yaml is configured.
+    # Defaults to ``'documentation'`` when no document-types.yml is configured.
     type: str
 
 

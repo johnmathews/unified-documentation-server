@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS source_status (
 );
 
 -- Single-row-per-key key/value store. Currently used by W2.3's conditional
--- backfill to remember the SHA256 of doc_types.yaml the last time
+-- backfill to remember the SHA256 of document-types.yml the last time
 -- classifications were reapplied, so restarts without config changes are an
 -- O(1) no-op.
 CREATE TABLE IF NOT EXISTS meta (
@@ -1185,7 +1185,7 @@ class KnowledgeBase:
     def backfill_types_if_needed(
         self, doc_types_config: DocTypesConfig, config_path: str | None,
     ) -> int:
-        """Reclassify every doc when ``doc_types.yaml`` changes; otherwise no-op.
+        """Reclassify every doc when ``document-types.yml`` changes; otherwise no-op.
 
         Compares a SHA256 of the config file content against the value stored
         in the ``meta`` table. When they differ (including the first-run case

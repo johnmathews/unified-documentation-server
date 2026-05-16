@@ -219,7 +219,7 @@ def test_real_worker_via_supervisor_classifies_doc_types(
         f"sources:\n  - name: repo-end-to-end\n    path: {repo}\n"
     )
 
-    doc_types_path = tmp_path / "doc_types.yaml"
+    doc_types_path = tmp_path / "document-types.yml"
     doc_types_path.write_text(
         "types: [documentation, journal, prompt, not-docs]\n"
         "fallback_type: documentation\n"
@@ -230,7 +230,7 @@ def test_real_worker_via_supervisor_classifies_doc_types(
     data_dir = tmp_path / "data"
     monkeypatch.setenv("DOCSERVER_CONFIG", str(sources_path))
     monkeypatch.setenv("DOCSERVER_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("DOCSERVER_DOC_TYPES_CONFIG", str(doc_types_path))
+    monkeypatch.setenv("DOCSERVER_DOCUMENT_TYPES_CONFIG", str(doc_types_path))
     monkeypatch.delenv("DOCSERVER_CHROMA_HOST", raising=False)
 
     sup = IngesterSupervisor(

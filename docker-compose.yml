@@ -66,6 +66,13 @@ services:
       # Configuration. Edit config/sources.yaml on the host (start from
       # config/sources.example.yaml).
       - ./config/sources.yaml:/config/sources.yaml:ro
+      # Doc-type classifier rules. Edit config/document-types.yml on the
+      # host (start from config/document-types.example.yml). Missing file
+      # is non-fatal — every doc falls back to type='documentation'.
+      # Editing this file and restarting triggers a one-shot
+      # reclassification of every existing doc (SHA256-gated on the
+      # ``meta`` table).
+      - ./config/document-types.yml:/config/document-types.yml:ro
       # Optional: bind-mount a host directory you want indexed as a local
       # source. Add a matching entry under `sources:` in
       # config/sources.yaml whose `path:` is the container-side path

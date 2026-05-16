@@ -10,6 +10,8 @@ venv/
 .env
 config/sources.yaml
 config/sources.local.yaml
+config/document-types.yml
+config/document-types.local.yml
 /data/
 .coverage
 htmlcov/

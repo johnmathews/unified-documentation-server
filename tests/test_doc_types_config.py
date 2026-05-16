@@ -25,7 +25,7 @@ def _write(path: Path, body: str) -> str:
 
 def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
     """A missing config file means every doc falls through to 'documentation'."""
-    missing = tmp_path / "doc_types.yaml"
+    missing = tmp_path / "document-types.yml"
 
     config = load_doc_types_config(str(missing))
 
@@ -38,7 +38,7 @@ def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
 
 def test_load_valid_config(tmp_path: Path) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types:
   - documentation
@@ -71,7 +71,7 @@ source_rules:
 
 def test_classify_per_source_overrides_global(tmp_path: Path) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation, journal, not-docs]
 fallback_type: documentation
@@ -94,7 +94,7 @@ source_rules:
 
 def test_classify_first_match_wins(tmp_path: Path) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation, journal, not-docs]
 fallback_type: documentation
@@ -115,7 +115,7 @@ global_rules:
 
 def test_classify_falls_through_to_fallback_type(tmp_path: Path) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation, journal]
 fallback_type: journal
@@ -128,7 +128,7 @@ fallback_type: journal
 
 def test_unknown_type_in_rule_raises(tmp_path: Path) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation, journal]
 fallback_type: documentation
@@ -144,7 +144,7 @@ global_rules:
 
 def test_fallback_type_not_in_vocabulary_raises(tmp_path: Path) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation, journal]
 fallback_type: prompt
@@ -157,7 +157,7 @@ fallback_type: prompt
 
 def test_malformed_rule_raises(tmp_path: Path) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation]
 fallback_type: documentation
@@ -173,7 +173,7 @@ global_rules:
 
 def test_unknown_source_name_warns(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation, not-docs]
 fallback_type: documentation
@@ -192,13 +192,13 @@ source_rules:
 
 def test_env_var_resolves_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = _write(
-        tmp_path / "doc_types.yaml",
+        tmp_path / "document-types.yml",
         """
 types: [documentation, journal]
 fallback_type: journal
 """,
     )
-    monkeypatch.setenv("DOCSERVER_DOC_TYPES_CONFIG", path)
+    monkeypatch.setenv("DOCSERVER_DOCUMENT_TYPES_CONFIG", path)
 
     config = load_doc_types_config()
 

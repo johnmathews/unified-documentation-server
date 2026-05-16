@@ -105,12 +105,12 @@ def test_main_passes_source_and_force_flags(small_config):
 
 
 def test_main_classifies_doc_types(tmp_path, monkeypatch, capsys):
-    """The worker must load doc_types.yaml and classify ingested docs.
+    """The worker must load document-types.yml and classify ingested docs.
 
     Reproduces the production bug where Docker-side ingestion ran in a
     subprocess that never received the classifier config, so every doc
     ended up with the fallback type ('documentation') in SQLite even
-    when ``doc_types.yaml`` would have classified it as ``journal``.
+    when ``document-types.yml`` would have classified it as ``journal``.
     """
     from docserver.knowledge_base import KnowledgeBase
 
@@ -125,14 +125,14 @@ def test_main_classifies_doc_types(tmp_path, monkeypatch, capsys):
     journal_dir.mkdir()
     (journal_dir / "260515-entry.md").write_text("# Entry\n\nContent.")
 
-    doc_types_path = tmp_path / "doc_types.yaml"
+    doc_types_path = tmp_path / "document-types.yml"
     doc_types_path.write_text(
         "types: [documentation, journal, prompt, not-docs]\n"
         "fallback_type: documentation\n"
         "global_rules:\n"
         "  - {pattern: '**/journal/**', type: journal}\n"
     )
-    monkeypatch.setenv("DOCSERVER_DOC_TYPES_CONFIG", str(doc_types_path))
+    monkeypatch.setenv("DOCSERVER_DOCUMENT_TYPES_CONFIG", str(doc_types_path))
 
     config = Config(
         sources=[RepoSource(name="repo-types", path=str(src))],
@@ -150,23 +150,23 @@ def test_main_classifies_doc_types(tmp_path, monkeypatch, capsys):
         assert doc is not None
         assert doc["type"] == "journal", (
             f"worker did not classify doc; got type={doc['type']!r}. "
-            "doc_types.yaml not being loaded in the worker process?"
+            "document-types.yml not being loaded in the worker process?"
         )
     finally:
         kb.close()
 
 
 def test_main_returns_one_when_doc_types_config_invalid(small_config, tmp_path, monkeypatch):
-    """A malformed doc_types.yaml should fail loudly, not silently swallow
+    """A malformed document-types.yml should fail loudly, not silently swallow
     every doc into the fallback type."""
-    bad = tmp_path / "doc_types.yaml"
+    bad = tmp_path / "document-types.yml"
     bad.write_text(
         "types: [documentation]\n"
         "fallback_type: documentation\n"
         "global_rules:\n"
         "  - {pattern: '*.md', type: unknown-type}\n"
     )
-    monkeypatch.setenv("DOCSERVER_DOC_TYPES_CONFIG", str(bad))
+    monkeypatch.setenv("DOCSERVER_DOCUMENT_TYPES_CONFIG", str(bad))
     with patch.object(worker_module, "load_config", return_value=small_config):
         rc = worker_module.main(argv=[])
     assert rc == 1

@@ -1774,7 +1774,7 @@ def init_app(config: Config | None = None) -> FastMCP:
     # owns the hash bookkeeping in its ``meta`` table; missing config → all
     # docs fall through to the default 'documentation' type.
     doc_types_path = os.environ.get(
-        "DOCSERVER_DOC_TYPES_CONFIG", "/config/doc_types.yaml"
+        "DOCSERVER_DOCUMENT_TYPES_CONFIG", "/config/document-types.yml"
     )
     known_source_names = {s.name for s in config.sources}
     doc_types_config = load_doc_types_config(

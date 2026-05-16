@@ -13,7 +13,7 @@
 # ``file_path``. Supported wildcards: ``*`` (no slashes), ``?``, ``[abc]``,
 # and ``**`` (any depth, including slashes). Patterns are case-sensitive.
 #
-# Resolution: ``DOCSERVER_DOC_TYPES_CONFIG`` env var → /config/doc_types.yaml
+# Resolution: ``DOCSERVER_DOCUMENT_TYPES_CONFIG`` env var → /config/document-types.yml
 # default. Missing file → all docs classified as ``fallback_type``.
 
 # Vocabulary. The classifier rejects rules and ``fallback_type`` values that

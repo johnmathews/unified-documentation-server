@@ -231,7 +231,7 @@ def test_backfill_types_runs_when_hash_changes(kb, tmp_path):
 
     Sequence:
       1. Seed a few docs (default type 'documentation').
-      2. Write a doc_types.yaml that promotes journal/* to 'journal'.
+      2. Write a document-types.yml that promotes journal/* to 'journal'.
       3. First backfill reclassifies; second backfill no-ops; edited config
          triggers another reclassification.
     """
@@ -253,7 +253,7 @@ def test_backfill_types_runs_when_hash_changes(kb, tmp_path):
         {"source": "src", "file_path": "README.md", "title": "README", "is_chunk": False},
     )
 
-    config_path = tmp_path / "doc_types.yaml"
+    config_path = tmp_path / "document-types.yml"
     config_path.write_text(
         """
 types: [documentation, journal]

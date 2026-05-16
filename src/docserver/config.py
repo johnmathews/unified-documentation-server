@@ -224,7 +224,7 @@ def load_config(path: str | None = None) -> Config:
 # Document-type classifier (Stage 2 W2.2).
 # ---------------------------------------------------------------------------
 
-# Vocabulary returned when no doc_types.yaml exists. Stage 2 ships four types;
+# Vocabulary returned when no document-types.yml exists. Stage 2 ships four types;
 # the YAML schema's ``types`` block lets the operator extend without code
 # changes. Keep ``DEFAULT_FALLBACK_TYPE`` in this list.
 _DEFAULT_DOC_TYPES: tuple[str, ...] = ("documentation", "journal", "prompt", "not-docs")
@@ -241,7 +241,7 @@ class DocTypeRule:
 
 @dataclass(frozen=True)
 class DocTypesConfig:
-    """Parsed ``doc_types.yaml``. Frozen so it can be shared across threads."""
+    """Parsed ``document-types.yml``. Frozen so it can be shared across threads."""
 
     types: tuple[str, ...] = _DEFAULT_DOC_TYPES
     fallback_type: str = DEFAULT_FALLBACK_TYPE
@@ -289,19 +289,21 @@ def load_doc_types_config(
 
     Location precedence:
       1. ``path`` argument
-      2. ``DOCSERVER_DOC_TYPES_CONFIG`` environment variable
-      3. ``/config/doc_types.yaml`` (default)
+      2. ``DOCSERVER_DOCUMENT_TYPES_CONFIG`` environment variable
+      3. ``/config/document-types.yml`` (default)
 
     A missing file returns ``DocTypesConfig()`` — every document falls through
     to ``fallback_type`` (``documentation``). Validation errors raise
     ``ValueError``; references to unknown source names emit a warning.
     """
     if path is None:
-        path = os.environ.get("DOCSERVER_DOC_TYPES_CONFIG", "/config/doc_types.yaml")
+        path = os.environ.get(
+            "DOCSERVER_DOCUMENT_TYPES_CONFIG", "/config/document-types.yml"
+        )
 
     if not os.path.exists(path):
         logger.warning(
-            "doc_types config not found at %s; classifying every doc as fallback '%s'",
+            "document-types config not found at %s; classifying every doc as fallback '%s'",
             path,
             DEFAULT_FALLBACK_TYPE,
             extra={"event": "doc_types_config_missing", "path": path},
@@ -316,7 +318,7 @@ def load_doc_types_config(
     if isinstance(raw_types, list):
         types_list = [str(t) for t in cast("list[object]", raw_types)]
         if not types_list:
-            raise ValueError("doc_types config: 'types' must contain at least one entry")
+            raise ValueError("document-types config: 'types' must contain at least one entry")
         types = tuple(types_list)
     else:
         types = _DEFAULT_DOC_TYPES
@@ -324,10 +326,10 @@ def load_doc_types_config(
 
     fallback_raw = raw.get("fallback_type", DEFAULT_FALLBACK_TYPE)
     if not isinstance(fallback_raw, str) or not fallback_raw:
-        raise ValueError("doc_types config: 'fallback_type' must be a non-empty string")
+        raise ValueError("document-types config: 'fallback_type' must be a non-empty string")
     if fallback_raw not in valid_types:
         raise ValueError(
-            f"doc_types config: fallback_type '{fallback_raw}' is not in the "
+            f"document-types config: fallback_type '{fallback_raw}' is not in the "
             f"vocabulary {sorted(valid_types)}"
         )
 
@@ -346,13 +348,13 @@ def load_doc_types_config(
             source_rules[source_name_str] = parsed
             if known_source_names is not None and source_name_str not in known_source_names:
                 logger.warning(
-                    "doc_types config: source '%s' is not in sources.yaml; rules ignored",
+                    "document-types config: source '%s' is not in sources.yaml; rules ignored",
                     source_name_str,
                     extra={"event": "doc_types_unknown_source", "source": source_name_str},
                 )
     elif raw_source_rules is not None:
         raise ValueError(
-            "doc_types config: 'source_rules' must be a mapping of source name → rule list"
+            "document-types config: 'source_rules' must be a mapping of source name → rule list"
         )
 
     return DocTypesConfig(

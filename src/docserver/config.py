@@ -239,13 +239,29 @@ class DocTypeRule:
     type: str
 
 
+# Baked-in defaults that mirror config/document-types.example.yml. These apply
+# when no document-types.yml is present so the common cases (journal/, prompts/,
+# *.lock, .DS_Store) classify correctly out of the box. An explicit YAML that
+# defines its own ``global_rules`` REPLACES these — see ``load_doc_types_config``.
+# When changing this tuple, bump ``_DOC_TYPES_DEFAULTS_VERSION`` in
+# ``knowledge_base.py`` so existing deployments reclassify on next startup.
+_DEFAULT_GLOBAL_RULES: tuple[DocTypeRule, ...] = (
+    DocTypeRule(pattern="**/journal/**", type="journal"),
+    DocTypeRule(pattern="journal/**", type="journal"),
+    DocTypeRule(pattern="**/prompts/**", type="prompt"),
+    DocTypeRule(pattern="prompts/**", type="prompt"),
+    DocTypeRule(pattern="**/.DS_Store", type="not-docs"),
+    DocTypeRule(pattern="**/*.lock", type="not-docs"),
+)
+
+
 @dataclass(frozen=True)
 class DocTypesConfig:
     """Parsed ``document-types.yml``. Frozen so it can be shared across threads."""
 
     types: tuple[str, ...] = _DEFAULT_DOC_TYPES
     fallback_type: str = DEFAULT_FALLBACK_TYPE
-    global_rules: tuple[DocTypeRule, ...] = ()
+    global_rules: tuple[DocTypeRule, ...] = _DEFAULT_GLOBAL_RULES
     source_rules: dict[str, tuple[DocTypeRule, ...]] = field(default_factory=dict)
 
 
@@ -292,9 +308,10 @@ def load_doc_types_config(
       2. ``DOCSERVER_DOCUMENT_TYPES_CONFIG`` environment variable
       3. ``/config/document-types.yml`` (default)
 
-    A missing file returns ``DocTypesConfig()`` — every document falls through
-    to ``fallback_type`` (``documentation``). Validation errors raise
-    ``ValueError``; references to unknown source names emit a warning.
+    A missing file returns ``DocTypesConfig()`` which carries the baked-in
+    default ``global_rules`` (journal/, prompts/, *.lock, .DS_Store). Validation
+    errors raise ``ValueError``; references to unknown source names emit a
+    warning.
     """
     if path is None:
         path = os.environ.get(
@@ -303,7 +320,8 @@ def load_doc_types_config(
 
     if not os.path.exists(path):
         logger.warning(
-            "document-types config not found at %s; classifying every doc as fallback '%s'",
+            "document-types config not found at %s; using built-in defaults "
+            "(journal/, prompts/, *.lock, .DS_Store) with fallback '%s'",
             path,
             DEFAULT_FALLBACK_TYPE,
             extra={"event": "doc_types_config_missing", "path": path},

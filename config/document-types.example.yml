@@ -1,5 +1,11 @@
 # Document-type classifier rules.
 #
+# The ``global_rules`` below are also baked into ``DocTypesConfig`` as defaults
+# (see ``_DEFAULT_GLOBAL_RULES`` in src/docserver/config.py). When this file is
+# absent, those defaults apply automatically. Copy this file to
+# ``document-types.yml`` only when you need to override or extend them — an
+# explicit YAML's ``global_rules`` REPLACES the defaults, it does not merge.
+#
 # Each parent document is assigned exactly one type. The classifier walks the
 # rule list per-source first, then global, then falls back to ``fallback_type``.
 # First match wins (mirrors .gitignore semantics — exceptions before catch-alls).

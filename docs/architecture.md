@@ -118,11 +118,17 @@ content_hash  TEXT           -- SHA-256 of file content for change detection
 type          TEXT           -- one of documentation/journal/prompt/not-docs
 ```
 
-A secondary `meta (key, value)` table records the SHA256 of `document-types.yml`
-the last time classifications were reapplied. On startup the docserver
-compares the current file hash against this stored value; identical hashes
-short-circuit (O(1) check), differing hashes trigger a backfill that
-reclassifies every parent doc and syncs ChromaDB metadata.
+A secondary `meta (key, value)` table records a versioned cache key the last
+time classifications were reapplied. The key combines
+`_DOC_TYPES_DEFAULTS_VERSION` (a string in `knowledge_base.py` — currently
+`v2`) with the SHA256 of `document-types.yml`, stored as `"{version}:{sha}"`
+(empty `sha` when no YAML is present). On startup the docserver compares the
+current combined key against the stored value; identical values
+short-circuit (O(1) check), differing values trigger a backfill that
+reclassifies every parent doc and syncs ChromaDB metadata. Bumping
+`_DOC_TYPES_DEFAULTS_VERSION` therefore forces a one-shot reclassification
+across every deployment, even when no YAML file is in use — required
+whenever the baked-in default rules change.
 
 Supports structured queries like:
 - "When was documentation about X created?"
@@ -136,8 +142,14 @@ Parent docs (non-chunks) are returned by `query_documents()` so results represen
 Each parent document and chunk carries a `type` in the `documents` table.
 Stage 2 ships four types — `documentation`, `journal`, `prompt`, `not-docs` —
 defined in `config/document-types.yml` (resolved from `DOCSERVER_DOCUMENT_TYPES_CONFIG`,
-defaults to `/config/document-types.yml`). Classifier rules are first-match-wins,
-per-source before global, then `fallback_type`. Search, query, and chat
+defaults to `/config/document-types.yml`). When the YAML is absent, the
+classifier falls back to a baked-in default rule set
+(`_DEFAULT_GLOBAL_RULES` in `config.py`) that covers the common cases —
+`**/journal/**` → `journal`, `**/prompts/**` → `prompt`, `**/*.lock` and
+`**/.DS_Store` → `not-docs` — so the webapp's Journal page works
+out-of-the-box without an operator copying the example YAML. An explicit
+YAML's `global_rules` REPLACES the defaults (no merge). Classifier rules
+are first-match-wins, per-source before global, then `fallback_type`. Search, query, and chat
 endpoints accept an `exclude_types` parameter that filters BM25 (via a
 `JOIN documents` clause) and the dense leg (via Chroma's `$nin` operator).
 Chunk metadata in ChromaDB also carries `type` so the two legs filter

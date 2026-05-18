@@ -1155,18 +1155,37 @@ class KnowledgeBase:
 
     _DOC_TYPES_HASH_KEY: ClassVar[str] = "doc_types_hash"
 
+    # Bump this whenever ``_DEFAULT_GLOBAL_RULES`` in ``config.py`` changes so
+    # existing deployments reclassify on the next startup. The cache key in the
+    # ``meta`` table is ``f"{version}:{sha256-or-empty}"``; pre-versioned rows
+    # (bare SHA256 or empty string) differ from any combined form and therefore
+    # always trigger a one-shot reclassification on upgrade.
+    _DOC_TYPES_DEFAULTS_VERSION: ClassVar[str] = "v2"
+
     @staticmethod
     def _hash_file(path: str | None) -> str:
         """Return the SHA256 of the file at *path*, or empty string if missing.
 
-        Used as the cache key for conditional reclassification. The empty-hash
-        sentinel maps to "no doc_types config" — restart-without-config edits
-        do not re-trigger a backfill.
+        Used as part of the cache key for conditional reclassification. The
+        empty-hash sentinel maps to "no doc_types config"; the caller combines
+        it with ``_DOC_TYPES_DEFAULTS_VERSION`` so the baked-in defaults are
+        part of the cache key too.
         """
         if not path or not os.path.exists(path):
             return ""
         with open(path, "rb") as fh:
             return hashlib.sha256(fh.read()).hexdigest()
+
+    @classmethod
+    def _doc_types_cache_key(cls, path: str | None) -> str:
+        """Return the versioned cache key stored in the ``meta`` table.
+
+        Format: ``f"{_DOC_TYPES_DEFAULTS_VERSION}:{sha256-of-config-or-empty}"``.
+        Bumping the version invalidates every deployment's stored value so the
+        next ``backfill_types_if_needed`` call reclassifies under the new
+        baked-in defaults.
+        """
+        return f"{cls._DOC_TYPES_DEFAULTS_VERSION}:{cls._hash_file(path)}"
 
     def _read_doc_types_hash(self) -> str | None:
         with self._connect() as conn:
@@ -1187,18 +1206,22 @@ class KnowledgeBase:
     ) -> int:
         """Reclassify every doc when ``document-types.yml`` changes; otherwise no-op.
 
-        Compares a SHA256 of the config file content against the value stored
-        in the ``meta`` table. When they differ (including the first-run case
-        where the row is missing), every parent doc and chunk is reclassified
-        from its ``file_path`` and ``source``. Rows whose type is unchanged
-        skip the UPDATE so SQLite WAL churn stays proportional to actual
-        change. ChromaDB chunk metadata is kept in sync so the dense leg's
-        type filter sees the same values as the BM25 leg.
+        Compares a versioned cache key against the value stored in the ``meta``
+        table. The key combines ``_DOC_TYPES_DEFAULTS_VERSION`` with a SHA256
+        of the config file content (or empty string if absent), so changes to
+        the baked-in defaults invalidate the cache without requiring an
+        operator to edit the YAML. When the stored value differs (including
+        the first-run case where the row is missing, and the legacy case
+        where the row holds a bare SHA256 or an empty string), every parent
+        doc and chunk is reclassified from its ``file_path`` and ``source``.
+        Rows whose type is unchanged skip the UPDATE so SQLite WAL churn stays
+        proportional to actual change. ChromaDB chunk metadata is kept in sync
+        so the dense leg's type filter sees the same values as the BM25 leg.
 
         Returns the number of SQLite rows whose type changed. Always stores
-        the new hash, so subsequent calls with the same config short-circuit.
+        the new key, so subsequent calls with the same config short-circuit.
         """
-        new_hash = self._hash_file(config_path)
+        new_hash = self._doc_types_cache_key(config_path)
         stored_hash = self._read_doc_types_hash()
         if stored_hash == new_hash:
             logger.debug(

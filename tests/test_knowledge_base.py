@@ -298,6 +298,108 @@ global_rules:
     assert readme_doc_after["type"] == "journal"
 
 
+def test_backfill_reclassifies_when_legacy_bare_sha_stored(kb, tmp_path):
+    """Legacy ``meta.doc_types_hash`` values (bare SHA256, no version prefix)
+    must trigger one more backfill so deployments built before the defaults
+    change pick up the new baked-in rules on next startup.
+    """
+    import sqlite3
+
+    from docserver.config import load_doc_types_config
+
+    # Seed a doc whose path the (legacy) default rules wouldn't classify, but
+    # which the new YAML does.
+    kb.upsert_document(
+        "src:journal/2026-05-18.md",
+        "",
+        {
+            "source": "src",
+            "file_path": "journal/2026-05-18.md",
+            "title": "Today",
+            "is_chunk": False,
+        },
+    )
+
+    config_path = tmp_path / "document-types.yml"
+    config_path.write_text(
+        """
+types: [documentation, journal]
+fallback_type: documentation
+global_rules:
+  - pattern: "**/journal/**"
+    type: journal
+"""
+    )
+    cfg = load_doc_types_config(str(config_path))
+
+    # Simulate a deployment that already ran a previous version of the backfill
+    # and stored only the bare sha256 of the config file (no version prefix).
+    import hashlib
+
+    bare_sha = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    with sqlite3.connect(kb._db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("doc_types_hash", bare_sha),
+        )
+
+    # First run after the upgrade: the combined hash differs from the bare
+    # legacy hash, so backfill must run.
+    updated = kb.backfill_types_if_needed(cfg, str(config_path))
+    assert updated == 1
+    journal_doc = kb.get_document("src:journal/2026-05-18.md")
+    assert journal_doc is not None
+    assert journal_doc["type"] == "journal"
+
+    # Second run with the same config short-circuits: the combined hash is
+    # now stored.
+    updated_again = kb.backfill_types_if_needed(cfg, str(config_path))
+    assert updated_again == 0
+
+
+def test_backfill_reclassifies_when_no_config_after_legacy_empty_hash(kb, tmp_path):
+    """The missing-config path also forces one reclassification on upgrade.
+
+    Pre-upgrade deployments without ``document-types.yml`` stored an empty
+    string as the cache key. The new combined-hash form is ``v2:`` (version
+    prefix only, empty sha), which differs from ``""`` — so the backfill
+    fires once and applies the baked-in defaults.
+    """
+    import sqlite3
+
+    kb.upsert_document(
+        "src:journal/2026-05-18.md",
+        "",
+        {
+            "source": "src",
+            "file_path": "journal/2026-05-18.md",
+            "title": "Today",
+            "is_chunk": False,
+        },
+    )
+
+    # Seed the legacy empty-string sentinel.
+    with sqlite3.connect(kb._db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("doc_types_hash", ""),
+        )
+
+    from docserver.config import DocTypesConfig
+
+    missing_path = str(tmp_path / "absent.yml")
+    cfg = DocTypesConfig()  # baked-in defaults
+
+    updated = kb.backfill_types_if_needed(cfg, missing_path)
+    assert updated == 1
+    journal_doc = kb.get_document("src:journal/2026-05-18.md")
+    assert journal_doc is not None
+    assert journal_doc["type"] == "journal"
+
+    # And idempotent on the second call.
+    assert kb.backfill_types_if_needed(cfg, missing_path) == 0
+
+
 def test_meta_table_exists(kb):
     """Stage 2 W2.1: meta key/value table is available for W2.3's hash bookkeeping."""
     import sqlite3

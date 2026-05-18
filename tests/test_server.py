@@ -1120,3 +1120,109 @@ class TestSourcesTreeEndpoints:
             assert body["sources"][0]["files"] == []
         finally:
             kb.close()
+
+    def test_single_source_tree_includes_type_field(self, tmp_path: Path) -> None:
+        """Regression: each file in the tree must ship its classifier ``type``.
+
+        The webapp's /journal page filters by ``type === "journal"``; if the
+        endpoint silently degrades the type field to "documentation" for every
+        file, the page shows zero entries. Pin the field so future regressions
+        of either the classifier defaults or the SQL projection in
+        ``get_source_files`` are caught.
+        """
+        from docserver.config import DocTypesConfig, classify_doc_type
+
+        mcp, kb = self._make_app(tmp_path, source_name="docs")
+        try:
+            cfg = DocTypesConfig()  # baked-in defaults (journal/, prompts/)
+            kb.upsert_document(
+                "docs:journal/2026-05-18.md",
+                "",
+                {
+                    "source": "docs",
+                    "file_path": "journal/2026-05-18.md",
+                    "title": "Today",
+                    "is_chunk": False,
+                    "type": classify_doc_type(
+                        "journal/2026-05-18.md", "docs", cfg,
+                    ),
+                },
+            )
+            kb.upsert_document(
+                "docs:guide.md",
+                "",
+                {
+                    "source": "docs",
+                    "file_path": "guide.md",
+                    "title": "Guide",
+                    "is_chunk": False,
+                    "type": classify_doc_type("guide.md", "docs", cfg),
+                },
+            )
+
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/docs/tree")
+            assert response.status_code == 200
+            by_path = {f["file_path"]: f for f in response.json()["files"]}
+            assert by_path["journal/2026-05-18.md"]["type"] == "journal"
+            assert by_path["guide.md"]["type"] == "documentation"
+        finally:
+            kb.close()
+
+    def test_bulk_tree_includes_type_field(self, tmp_path: Path) -> None:
+        """Same regression as the single-source case, for the bulk endpoint.
+
+        The Journal page calls ``GET /api/sources/tree`` (bulk) and filters
+        client-side by ``type``. Both endpoints must ship the field.
+        """
+        from docserver.config import DocTypesConfig, classify_doc_type
+
+        source_a = tmp_path / "a"
+        source_a.mkdir()
+        source_b = tmp_path / "b"
+        source_b.mkdir()
+        config = Config(
+            sources=[
+                RepoSource(name="a", path=str(source_a)),
+                RepoSource(name="b", path=str(source_b)),
+            ],
+            data_dir=str(tmp_path / "data"),
+            poll_interval_seconds=9999,
+        )
+        mcp = server_module.init_app(config)
+        kb = server_module._get_kb()
+        try:
+            cfg = DocTypesConfig()
+            kb.upsert_document(
+                "a:journal/x.md",
+                "",
+                {
+                    "source": "a",
+                    "file_path": "journal/x.md",
+                    "is_chunk": False,
+                    "type": classify_doc_type("journal/x.md", "a", cfg),
+                },
+            )
+            kb.upsert_document(
+                "b:docs/y.md",
+                "",
+                {
+                    "source": "b",
+                    "file_path": "docs/y.md",
+                    "is_chunk": False,
+                    "type": classify_doc_type("docs/y.md", "b", cfg),
+                },
+            )
+
+            client = TestClient(mcp.streamable_http_app())
+            response = client.get("/api/sources/tree")
+            assert response.status_code == 200
+            by_name = {s["source"]: s for s in response.json()["sources"]}
+            a_file = by_name["a"]["files"][0]
+            b_file = by_name["b"]["files"][0]
+            assert a_file["file_path"] == "journal/x.md"
+            assert a_file["type"] == "journal"
+            assert b_file["file_path"] == "docs/y.md"
+            assert b_file["type"] == "documentation"
+        finally:
+            kb.close()

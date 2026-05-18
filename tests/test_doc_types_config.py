@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from docserver.config import (
+    _DEFAULT_GLOBAL_RULES,
     DEFAULT_FALLBACK_TYPE,
     DocTypeRule,
     DocTypesConfig,
@@ -24,16 +25,24 @@ def _write(path: Path, body: str) -> str:
 
 
 def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
-    """A missing config file means every doc falls through to 'documentation'."""
+    """A missing config file uses the baked-in default rules.
+
+    The defaults classify journal/prompt paths correctly so the Journal page
+    works out-of-the-box without an operator copying the example YAML.
+    """
     missing = tmp_path / "document-types.yml"
 
     config = load_doc_types_config(str(missing))
 
     assert config.fallback_type == DEFAULT_FALLBACK_TYPE
-    assert config.global_rules == ()
+    assert config.global_rules == _DEFAULT_GLOBAL_RULES
     assert config.source_rules == {}
     assert "documentation" in config.types
-    assert classify_doc_type("anything.md", "any-source", config) == "documentation"
+    # Files outside the default patterns still fall through to the fallback.
+    assert classify_doc_type("README.md", "any-source", config) == "documentation"
+    # Default rules cover journal and prompt paths.
+    assert classify_doc_type("journal/x.md", "any-source", config) == "journal"
+    assert classify_doc_type("prompts/x.md", "any-source", config) == "prompt"
 
 
 def test_load_valid_config(tmp_path: Path) -> None:
@@ -205,9 +214,51 @@ fallback_type: journal
     assert config.fallback_type == "journal"
 
 
-def test_classify_with_default_config_returns_fallback() -> None:
-    """A bare DocTypesConfig() (no rules) classifies every file as fallback."""
+def test_default_config_classifies_journal_and_prompt_paths() -> None:
+    """A bare DocTypesConfig() now ships baked-in defaults for common paths.
+
+    Bug fix: the previous behaviour ("every file is documentation") made the
+    webapp's Journal tab show 0 entries whenever no document-types.yml was
+    present. The defaults now mirror config/document-types.example.yml so the
+    common cases work out of the box.
+    """
     config = DocTypesConfig()
 
-    assert classify_doc_type("a/b/c.md", "any", config) == DEFAULT_FALLBACK_TYPE
-    assert classify_doc_type("journal/x.md", "any", config) == DEFAULT_FALLBACK_TYPE
+    # Journal patterns: top-level and nested.
+    assert classify_doc_type("journal/260518-x.md", "src", config) == "journal"
+    assert classify_doc_type("nested/journal/y.md", "src", config) == "journal"
+    # Prompt patterns: top-level and nested.
+    assert classify_doc_type("prompts/foo.md", "src", config) == "prompt"
+    assert classify_doc_type("nested/prompts/foo.md", "src", config) == "prompt"
+    # Lock files and .DS_Store are not docs.
+    assert classify_doc_type("uv.lock", "src", config) == "not-docs"
+    assert classify_doc_type("nested/.DS_Store", "src", config) == "not-docs"
+    # Everything else still falls through to the fallback.
+    assert classify_doc_type("README.md", "src", config) == DEFAULT_FALLBACK_TYPE
+    assert classify_doc_type("docs/architecture.md", "src", config) == DEFAULT_FALLBACK_TYPE
+
+
+def test_yaml_global_rules_replace_defaults(tmp_path: Path) -> None:
+    """An explicit YAML's global_rules REPLACES the defaults (no merge).
+
+    Preserving original semantics: an operator who wants different rules must
+    list everything they care about — the loader does not silently add the
+    baked-in defaults underneath.
+    """
+    path = _write(
+        tmp_path / "document-types.yml",
+        """
+types: [documentation, not-docs]
+fallback_type: documentation
+global_rules:
+  - pattern: "**/*.log"
+    type: not-docs
+""",
+    )
+
+    config = load_doc_types_config(path)
+
+    # Only the rule from YAML is present; the baked-in journal/prompt rules
+    # are not merged in.
+    assert config.global_rules == (DocTypeRule(pattern="**/*.log", type="not-docs"),)
+    assert classify_doc_type("journal/x.md", "src", config) == "documentation"

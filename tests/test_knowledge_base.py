@@ -116,6 +116,33 @@ def test_get_source_files_includes_type(kb):
     assert rows[0]["type"] == "journal"
 
 
+def test_get_source_files_includes_line_count(kb):
+    """Per-source table needs line_count derived from stored content."""
+    kb.upsert_document(
+        "src:docs/three.md",
+        "line one\nline two\nline three",
+        {
+            "source": "src",
+            "file_path": "docs/three.md",
+            "title": "Three",
+            "is_chunk": False,
+        },
+    )
+    kb.upsert_document(
+        "src:docs/empty.md",
+        "",
+        {
+            "source": "src",
+            "file_path": "docs/empty.md",
+            "title": "Empty",
+            "is_chunk": False,
+        },
+    )
+    rows = {r["file_path"]: r for r in kb.get_source_files("src")}
+    assert rows["docs/three.md"]["line_count"] == 3
+    assert rows["docs/empty.md"]["line_count"] == 0
+
+
 def test_query_documents_exclude_types(kb):
     """Stage 2 W2.4: query_documents filters out rows whose type is excluded."""
     kb.upsert_document(

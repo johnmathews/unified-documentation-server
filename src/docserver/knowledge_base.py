@@ -1137,9 +1137,18 @@ class KnowledgeBase:
         ``type`` field (W2.5) lets the webapp render badges and apply the
         type-filter inline without a second roundtrip.
         """
+        # line_count is derived from the stored parent-doc content so the
+        # webapp's per-source table can show it without a second roundtrip.
+        # Newlines + 1; NULL/empty content (e.g. PDFs) → 0.
         rows = self._fetchall(
             """
-            SELECT doc_id, file_path, title, modified_at, type
+            SELECT doc_id, file_path, title, modified_at, type,
+                   CASE
+                       WHEN content IS NULL OR content = '' THEN 0
+                       ELSE LENGTH(content)
+                            - LENGTH(REPLACE(content, CHAR(10), ''))
+                            + 1
+                   END AS line_count
             FROM documents
             WHERE source = ?
               AND (is_chunk = FALSE OR chunk_index IS NULL)

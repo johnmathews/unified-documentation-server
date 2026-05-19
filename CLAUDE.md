@@ -25,6 +25,10 @@
 - `uv run python -m docserver` - Run server locally
 - `docker compose up -d` - Run containerized
 
+## Backend must run whenever a frontend does
+
+If you start a local webapp instance — for Playwright, UI change checks, screenshots, or manual verification — you **must** also start this backend (`uv run python -m docserver`, or `docker compose up -d` for the full stack). The webapp has no mock data layer and proxies every route to the docserver; without it the UI shows empty / error states that don't reflect real behaviour.
+
 ## Architecture Decisions
 
 - **uv** for dependency and environment management
@@ -44,7 +48,7 @@
 - Documents are chunked at ~400 chars on section/paragraph boundaries with 100-char overlap; parent doc metadata stored separately for structured queries
 - Doc IDs follow pattern: `{source}:{path}` (parent) and `{source}:{path}#chunk{N}` (chunks)
 - Chunks go into ChromaDB (vectors), the FTS5 `chunks_fts` virtual table (BM25), and the SQLite `documents` table (raw content). Parent docs live only in `documents`.
-- APScheduler runs ingestion on a background thread
+- APScheduler runs ingestion on a background thread. Default: a cycle on startup then every `DOCSERVER_POLL_INTERVAL`s. For fast local dev, `DOCSERVER_POLL_INTERVAL=0` + `DOCSERVER_INGEST_ON_START=0` makes the supervisor serve the persisted corpus and never auto-ingest (`/rescan` still works); see `docs/operations.md` → *Fast local development*
 - MCP transport: streamable HTTP on port 8080
 - Chat agent uses Claude API tool-use loop (not single-shot RAG) with search_docs, query_docs, get_document, list_sources, get_bookmarks
 - Chat conversations persisted in `conversations.db` (separate from docserver.db) for review and resumption

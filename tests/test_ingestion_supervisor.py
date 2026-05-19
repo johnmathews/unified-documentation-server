@@ -413,3 +413,49 @@ def test_stop_terminates_running_worker(supervisor_factory):
     while time.time() < deadline and proc.poll() is None:
         time.sleep(0.1)
     assert proc.poll() is not None, "stop() should have terminated the worker"
+
+
+# ---------------------------------------------------------------------------
+# Scheduling mode (poll_interval / ingest_on_start matrix)
+# ---------------------------------------------------------------------------
+
+
+def _sup(poll: int, ingest_on_start: bool) -> IngesterSupervisor:
+    cfg = Config(
+        sources=[],
+        data_dir="/tmp/unused",
+        poll_interval_seconds=poll,
+        ingest_on_start=ingest_on_start,
+    )
+    return IngesterSupervisor(cfg)
+
+
+def test_mode_default_is_interval_immediate():
+    """poll>0, ingest_on_start=True (production default): recurring + immediate."""
+    assert _sup(1800, True)._ingestion_mode() == ("interval", True)
+
+
+def test_mode_interval_without_immediate():
+    """poll>0, ingest_on_start=False: recurring but no boot cycle."""
+    assert _sup(1800, False)._ingestion_mode() == ("interval", False)
+
+
+def test_mode_one_shot_when_poll_zero_but_ingest_on_start():
+    """poll<=0, ingest_on_start=True: ingest once on boot, never poll."""
+    assert _sup(0, True)._ingestion_mode() == ("once", True)
+
+
+def test_mode_disabled_when_poll_zero_and_no_ingest_on_start():
+    """poll<=0, ingest_on_start=False: the fast local-dev path."""
+    assert _sup(0, False)._ingestion_mode() == ("disabled", False)
+    assert _sup(-1, False)._ingestion_mode() == ("disabled", False)
+
+
+def test_start_disabled_mode_never_starts_scheduler():
+    """Disabled mode must not start APScheduler or spawn any worker, and
+    stop() must remain safe to call."""
+    sup = _sup(0, False)
+    sup.start()
+    assert sup._scheduler.running is False
+    assert sup._scheduler.get_jobs() == []
+    sup.stop()  # must not raise even though the scheduler never started

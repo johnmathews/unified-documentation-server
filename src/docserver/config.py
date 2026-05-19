@@ -94,6 +94,10 @@ class Config:
     sources: list[RepoSource]
     data_dir: str = "/data"
     poll_interval_seconds: int = 1800
+    # When False, the ingestion supervisor skips the immediate startup cycle.
+    # Combined with poll_interval_seconds <= 0 this gives a "serve the
+    # already-built corpus, never auto-ingest" mode for fast local dev.
+    ingest_on_start: bool = True
     server_host: str = "0.0.0.0"
     server_port: int = 8080
     # When chroma_host is set, KnowledgeBase uses chromadb.HttpClient against
@@ -218,6 +222,13 @@ def load_config(path: str | None = None) -> Config:
         )
     )
 
+    _FALSEY = {"0", "false", "no", "off", ""}
+    ingest_on_start_raw = os.environ.get("DOCSERVER_INGEST_ON_START")
+    if ingest_on_start_raw is not None:
+        ingest_on_start = ingest_on_start_raw.strip().lower() not in _FALSEY
+    else:
+        ingest_on_start = bool(raw.get("ingest_on_start", True))
+
     server_host = os.environ.get(
         "DOCSERVER_HOST",
         str(raw.get("server_host", "0.0.0.0")),
@@ -249,6 +260,7 @@ def load_config(path: str | None = None) -> Config:
         sources=sources,
         data_dir=data_dir,
         poll_interval_seconds=poll_interval_seconds,
+        ingest_on_start=ingest_on_start,
         server_host=server_host,
         server_port=server_port,
         chroma_host=chroma_host,

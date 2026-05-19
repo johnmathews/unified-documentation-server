@@ -1857,6 +1857,7 @@ def run_server() -> None:
     env_vars = {
         "DOCSERVER_DATA_DIR": cfg.data_dir,
         "DOCSERVER_POLL_INTERVAL": str(cfg.poll_interval_seconds),
+        "DOCSERVER_INGEST_ON_START": str(cfg.ingest_on_start),
         "DOCSERVER_HOST": cfg.server_host,
         "DOCSERVER_PORT": str(cfg.server_port),
         "DOCSERVER_LOG_FORMAT": os.environ.get("DOCSERVER_LOG_FORMAT", "json"),

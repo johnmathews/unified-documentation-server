@@ -384,7 +384,8 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOCSERVER_POLL_INTERVAL` | `1800` | How often (in seconds) the server polls sources for changes. Each cycle syncs remote repos (git fetch) and checks local directories for modified files. Remote sources whose HEAD did not advance skip the file walk entirely (logged as `skip_unchanged`), so idle cycles are cheap. Default is 1800 (30 minutes). |
+| `DOCSERVER_POLL_INTERVAL` | `1800` | How often (in seconds) the server polls sources for changes. Each cycle syncs remote repos (git fetch) and checks local directories for modified files. Remote sources whose HEAD did not advance skip the file walk entirely (logged as `skip_unchanged`), so idle cycles are cheap. Default is 1800 (30 minutes). **Set to `0` (or any value ≤ 0) to disable recurring polling entirely** — combine with `DOCSERVER_INGEST_ON_START=0` for a no-ingest "serve the persisted corpus" mode (see *Fast local development* below). |
+| `DOCSERVER_INGEST_ON_START` | `true` | Whether to run an ingestion cycle immediately on server startup. Default `true` (production behaviour). Set to `0`/`false`/`no`/`off` to skip the boot cycle; the server then serves whatever is already in the persisted store and only ingests when polled (or never, if `DOCSERVER_POLL_INTERVAL=0`). `/rescan` always works regardless of this setting. |
 | `DOCSERVER_DATA_DIR` | `/data` | Root directory for all persistent data: SQLite database, ChromaDB vector store, git clones of remote repos, and cached embedding model. Mount a Docker volume here. |
 | `DOCSERVER_CONFIG` | `/config/sources.yaml` | Path to the YAML config file that defines which repositories to index. Mount your config file to this path. |
 | `DOCSERVER_HOST` | `0.0.0.0` | Server bind address. Default binds to all interfaces inside the container. |
@@ -398,6 +399,33 @@ Set in `docker-compose.yml` under `environment`, or in a `.env` file alongside `
 | `DOCSERVER_EMBEDDING_BATCH_SIZE` | `8` | Chunks per ONNX forward pass. The transient activation tensor during inference is roughly proportional to `batch_size × seq_len × hidden_dim × num_layers × bytes_per_value`; on the infra VM (Linux x86-64, int8 quantised AVX2 model) we measured peaks of ~430 MB at batch=4, ~580 MB at batch=8, ~750 MB at batch=16, and ~810 MB at batch=32. The default of 8 keeps the worker comfortably under a 768 MB container `mem_limit`; raise on hosts with more headroom. Per-chunk inference time is roughly equal across batch=4..16. |
 
 Changes to environment variables require a container restart to take effect.
+
+### Fast local development
+
+The default startup behaviour (immediate ingestion cycle, then poll every 30
+minutes) is correct for production but expensive for local UI/iteration work:
+every `uv run python -m docserver` start loads the ONNX embedding model,
+git-fetches every configured remote repo, walks and hashes every doc, and
+re-embeds anything whose upstream HEAD moved — repeated on every poll. On a
+laptop this spins up the fans for no benefit when you only want to look at the
+already-indexed corpus.
+
+Because `DOCSERVER_DATA_DIR` persists across runs, the corpus is already built.
+To serve it as-is and skip all automatic ingestion:
+
+```bash
+DOCSERVER_DATA_DIR=./local-data \
+DOCSERVER_CONFIG=./config/sources.local.yaml \
+DOCSERVER_POLL_INTERVAL=0 \
+DOCSERVER_INGEST_ON_START=0 \
+uv run python -m docserver
+```
+
+The server boots immediately and stays cool. When you actually want fresh
+docs, POST `/rescan` (see *Rescan Endpoint*) — it runs a one-off cycle
+regardless of these settings. The mode the supervisor chose is logged at
+startup (`supervisor_disabled` / `supervisor_start`), and the active
+`DOCSERVER_INGEST_ON_START` value appears in the startup environment log.
 
 ## CI/CD
 

@@ -101,6 +101,48 @@ def test_env_vars_override_yaml(monkeypatch):
     assert config.server_port == 9090
 
 
+def test_ingest_on_start_defaults_true():
+    """Production/default: backend ingests on startup."""
+    config = load_config("/nonexistent/path.yaml")
+    assert config.ingest_on_start is True
+
+
+@pytest.mark.parametrize("falsey", ["0", "false", "False", "no", "off", ""])
+def test_ingest_on_start_env_false(monkeypatch, falsey):
+    """DOCSERVER_INGEST_ON_START falsey values disable the startup cycle."""
+    monkeypatch.setenv("DOCSERVER_INGEST_ON_START", falsey)
+    config = load_config("/nonexistent/path.yaml")
+    assert config.ingest_on_start is False
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "TRUE", "yes", "on"])
+def test_ingest_on_start_env_true(monkeypatch, truthy):
+    monkeypatch.setenv("DOCSERVER_INGEST_ON_START", truthy)
+    config = load_config("/nonexistent/path.yaml")
+    assert config.ingest_on_start is True
+
+
+def test_ingest_on_start_from_yaml():
+    data = {"sources": [], "ingest_on_start": False}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        f.flush()
+        config = load_config(f.name)
+    os.unlink(f.name)
+    assert config.ingest_on_start is False
+
+
+def test_ingest_on_start_env_overrides_yaml(monkeypatch):
+    data = {"sources": [], "ingest_on_start": True}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        f.flush()
+        monkeypatch.setenv("DOCSERVER_INGEST_ON_START", "0")
+        config = load_config(f.name)
+    os.unlink(f.name)
+    assert config.ingest_on_start is False
+
+
 def test_repo_source_defaults():
     src = RepoSource(name="test", path="/test")
     assert src.branch == "main"

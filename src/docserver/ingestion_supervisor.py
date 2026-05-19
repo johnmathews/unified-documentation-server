@@ -97,23 +97,84 @@ class IngesterSupervisor:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
-        """Begin scheduled ingestion. Runs the first cycle immediately."""
+    def _ingestion_mode(self) -> tuple[str, bool]:
+        """Decide how ingestion should be scheduled.
+
+        Returns ``(mode, immediate)`` where ``mode`` is one of:
+
+        - ``"interval"`` — recurring poll every ``poll_interval_seconds``.
+          ``immediate`` reflects ``config.ingest_on_start`` (run a cycle on
+          boot, then keep polling).
+        - ``"once"`` — ``poll_interval_seconds <= 0`` but
+          ``ingest_on_start`` is True: ingest a single time on boot, then
+          never poll.
+        - ``"disabled"`` — ``poll_interval_seconds <= 0`` and
+          ``ingest_on_start`` is False: never auto-ingest. The persisted
+          corpus is served as-is; ``/rescan`` still works on demand. This is
+          the fast local-dev path.
+        """
         interval = self.config.poll_interval_seconds
+        ingest_on_start = self.config.ingest_on_start
+        if interval <= 0 and not ingest_on_start:
+            return ("disabled", False)
+        if interval <= 0:
+            return ("once", True)
+        return ("interval", ingest_on_start)
+
+    def start(self) -> None:
+        """Begin scheduled ingestion per the configured mode.
+
+        Default (production): immediate cycle then recurring poll. Local dev
+        can opt out via ``DOCSERVER_POLL_INTERVAL=0`` and/or
+        ``DOCSERVER_INGEST_ON_START=0``.
+        """
+        mode, immediate = self._ingestion_mode()
+        interval = self.config.poll_interval_seconds
+
+        if mode == "disabled":
+            logger.info(
+                "Ingestion supervisor disabled "
+                "(poll_interval<=0, ingest_on_start=False); serving the "
+                "persisted corpus as-is. Refresh on demand via /rescan.",
+                extra={"event": "supervisor_disabled"},
+            )
+            return
+
+        if mode == "once":
+            logger.info(
+                "Starting ingestion supervisor (one-shot: single boot cycle, "
+                "no recurring poll; timeout=%.0fs).",
+                self._timeout,
+                extra={"event": "supervisor_start", "interval": 0},
+            )
+            _ = self._scheduler.add_job(
+                self._run_cycle_safe,
+                trigger="date",
+                run_date=datetime.now(UTC),
+                max_instances=1,
+                coalesce=True,
+            )
+            self._scheduler.start()
+            return
+
+        # mode == "interval"
         logger.info(
-            "Starting ingestion supervisor (interval=%ds, timeout=%.0fs).",
+            "Starting ingestion supervisor "
+            "(interval=%ds, immediate=%s, timeout=%.0fs).",
             interval,
+            immediate,
             self._timeout,
             extra={"event": "supervisor_start", "interval": interval},
         )
-        _ = self._scheduler.add_job(
-            self._run_cycle_safe,
-            trigger="interval",
-            seconds=interval,
-            next_run_time=datetime.now(UTC),
-            max_instances=1,
-            coalesce=True,
-        )
+        job_kwargs: dict[str, object] = {
+            "trigger": "interval",
+            "seconds": interval,
+            "max_instances": 1,
+            "coalesce": True,
+        }
+        if immediate:
+            job_kwargs["next_run_time"] = datetime.now(UTC)
+        _ = self._scheduler.add_job(self._run_cycle_safe, **job_kwargs)
         self._scheduler.start()
 
     def stop(self, *, terminate_timeout: float = 30.0) -> None:

@@ -30,6 +30,33 @@ def _looks_like_git_url(path: str) -> bool:
     return path.endswith(".git") and not os.path.isdir(path)
 
 
+_GITHUB_HOST_RE = re.compile(
+    r"""
+    ^(?:
+        (?:https?|ssh|git)://(?:[^@/]+@)?github\.com/  # https:// | ssh:// | git://[user@]github.com/
+        |
+        git@github\.com:                                # git@github.com:owner/repo
+    )
+    (?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _github_base_url(path: str) -> str | None:
+    """Return ``https://github.com/<owner>/<repo>`` for a github-hosted source.
+
+    Accepts the git URL forms a ``sources.yaml`` ``path`` may use (https,
+    ssh, ``git@github.com:``, with or without ``.git``). Returns ``None`` for
+    local filesystem paths and any non-github host — those get no "View on
+    GitHub" link rather than a broken one.
+    """
+    m = _GITHUB_HOST_RE.match(path.strip())
+    if not m:
+        return None
+    return f"https://github.com/{m.group('owner')}/{m.group('repo')}"
+
+
 def _expand_env_vars(value: str) -> str:
     """Replace ``${VAR}`` placeholders in *value* with environment variables."""
 
@@ -51,6 +78,15 @@ class RepoSource:
     glob_patterns: list[str] = field(default_factory=lambda: ["**/*.md"])
     exclude_patterns: list[str] = field(default_factory=list)
     is_remote: bool = False
+
+    @property
+    def github_url(self) -> str | None:
+        """Browseable ``https://github.com/owner/repo`` base, or None.
+
+        None for local-path sources and non-github hosts — the webapp uses
+        this to decide whether to show a "View on GitHub" link.
+        """
+        return _github_base_url(self.path)
 
 
 @dataclass

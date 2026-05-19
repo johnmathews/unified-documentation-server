@@ -243,6 +243,13 @@ class TestHealthEndpoint:
             assert "last_indexed" in src
             assert "last_error" in src
             assert "consecutive_failures" in src
+            # repo_url/branch let the webapp render a "View on GitHub" link.
+            # Always present; repo_url is None for local-path sources.
+            assert "repo_url" in src
+            assert src["repo_url"] is None or src["repo_url"].startswith(
+                "https://github.com/"
+            )
+            assert "branch" in src
 
     def test_health_last_ingestion_after_cycle(self, app) -> None:
         """/health should expose the most recent ingestion cycle metrics

@@ -772,6 +772,7 @@ def create_mcp(config: Config) -> FastMCP:
 
             sources_out: list[dict[str, str | int | None]] = []
             per_source_labels: list[str] = []
+            repo_by_name = {s.name: s for s in config.sources}
 
             for src in summary:
                 name = src["source"]
@@ -779,6 +780,7 @@ def create_mcp(config: Config) -> FastMCP:
                 label = _compute_source_status(st, poll_interval)
                 per_source_labels.append(label)
 
+                repo = repo_by_name.get(name)
                 sources_out.append(
                     {
                         "source": name,
@@ -790,6 +792,8 @@ def create_mcp(config: Config) -> FastMCP:
                         "last_error": st["last_error"] if st else None,
                         "last_error_at": st["last_error_at"] if st else None,
                         "consecutive_failures": st["consecutive_failures"] if st else 0,
+                        "repo_url": repo.github_url if repo else None,
+                        "branch": repo.branch if repo else None,
                     }
                 )
 

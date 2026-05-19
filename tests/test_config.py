@@ -6,7 +6,14 @@ import tempfile
 import pytest
 import yaml
 
-from docserver.config import Config, RepoSource, _expand_env_vars, _looks_like_git_url, load_config
+from docserver.config import (
+    Config,
+    RepoSource,
+    _expand_env_vars,
+    _github_base_url,
+    _looks_like_git_url,
+    load_config,
+)
 
 
 def test_load_config_defaults_when_no_file():
@@ -241,6 +248,57 @@ class TestGitUrlDetection:
             config = load_config(f.name)
         os.unlink(f.name)
         assert config.sources[0].is_remote is False
+
+
+class TestGithubBaseUrl:
+    """Normalisation of a source path to a browseable github base URL."""
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            (
+                "https://github.com/johnmathews/relay.git",
+                "https://github.com/johnmathews/relay",
+            ),
+            (
+                "https://github.com/johnmathews/relay",
+                "https://github.com/johnmathews/relay",
+            ),
+            (
+                "https://token@github.com/johnmathews/relay.git",
+                "https://github.com/johnmathews/relay",
+            ),
+            (
+                "git@github.com:johnmathews/relay.git",
+                "https://github.com/johnmathews/relay",
+            ),
+            (
+                "ssh://git@github.com/johnmathews/relay.git",
+                "https://github.com/johnmathews/relay",
+            ),
+            (
+                "git://github.com/johnmathews/relay.git",
+                "https://github.com/johnmathews/relay",
+            ),
+        ],
+    )
+    def test_github_urls_normalised(self, path: str, expected: str) -> None:
+        assert _github_base_url(path) == expected
+        assert RepoSource(name="s", path=path).github_url == expected
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/repos/home-server-docs",
+            "./relative/path",
+            "../sibling/repo",
+            "https://gitlab.com/owner/repo.git",
+            "git@bitbucket.org:owner/repo.git",
+        ],
+    )
+    def test_non_github_or_local_returns_none(self, path: str) -> None:
+        assert _github_base_url(path) is None
+        assert RepoSource(name="s", path=path).github_url is None
 
 
 class TestExpandEnvVars:
